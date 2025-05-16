@@ -1,0 +1,5 @@
+dronekit
+pymavlink
+opencv-python
+ultralytics
+torch

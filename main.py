@@ -67,6 +67,10 @@ def main():
             "fix-mode",
             "diagnostics",         # New command
             "reset-controller"     # New command
+        "safety-check",             # New command to run safety checks only
+        "orientation-check",        # New command to check orientation stability
+        "incremental-takeoff",      # New incremental takeoff test
+        "position-hold-check"       # New command to test position holding
         ],
         help="Mission to execute"
     )
@@ -95,6 +99,12 @@ def main():
         type=float,
         default=15.0,
         help="Throttle percentage for motor testing (0-100)"
+    )
+    parser.add_argument(
+    "--increment",
+    type=float,
+    default=1.0,
+    help="Height increment in meters for incremental takeoff test"
     )
 
     args = parser.parse_args()
@@ -161,6 +171,31 @@ def main():
                 logging.info("Reset command sent to flight controller")
             else:
                 logging.error("Failed to send reset command")
+        elif args.mission == "safety-check":
+            from drone.navigation import run_preflight_checks
+            checks_passed, failure_reason = run_preflight_checks(vehicle)
+            success = checks_passed
+            if not success:
+                logging.error(f"Safety checks failed: {failure_reason}")
+            else:
+                logging.info("All safety checks passed!")
+
+        elif args.mission == "orientation-check":
+            from drone.navigation import verify_orientation
+            success = verify_orientation(vehicle)
+            if success:
+                logging.info("Orientation is stable and suitable for takeoff")
+            else:
+                logging.warning("Orientation may be unstable - use caution")
+
+        elif args.mission == "incremental-takeoff":
+            from missions.test_missions import test_incremental_takeoff
+            success = test_incremental_takeoff(vehicle, args.altitude, args.increment)
+
+        elif args.mission == "position-hold-check":
+            from drone.navigation import verify_position_hold
+            success = verify_position_hold(vehicle
+
 
         if success:
             logging.info(f"Mission '{args.mission}' completed successfully")

@@ -1080,3 +1080,417 @@ def check_if_armed_simple(vehicle):
         return False
     except:
         return False
+
+
+# --- drone/navigation.py ---
+def run_preflight_checks(vehicle, min_gps_fix=3, min_battery=50, check_compass=True):
+    """
+    Run comprehensive pre-flight safety checks.
+
+    Args:
+        vehicle: The connected mavlink object
+        min_gps_fix: Minimum GPS fix type required (3 for 3D fix)
+        min_battery: Minimum battery percentage required
+        check_compass: Whether to check compass calibration
+
+    Returns:
+        (bool, str): Tuple of (checks_passed, failure_reason)
+    """
+    if not vehicle:
+        return False, "No vehicle connection"
+
+    try:
+        logging.info("Running pre-flight safety checks...")
+        failures = []
+
+        # Check 1: Vehicle heartbeat
+        logging.info("Check 1: Verifying vehicle heartbeat...")
+        msg = vehicle.recv_match(type='HEARTBEAT', blocking=True, timeout=2)
+        if not msg:
+            failures.append("No heartbeat from vehicle")
+
+        # Check 2: GPS status
+        logging.info("Check 2: Verifying GPS status...")
+        vehicle.mav.request_data_stream_send(
+            vehicle.target_system, vehicle.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_POSITION, 2, 1)
+
+        start_time = time.time()
+        gps_check_passed = False
+
+        while time.time() - start_time < 3:
+            msg = vehicle.recv_match(type='GPS_RAW_INT', blocking=False)
+            if msg:
+                fix_type = msg.fix_type
+                satellites = msg.satellites_visible
+
+                fix_type_name = "No GPS" if fix_type == 0 else \
+                               "No Fix" if fix_type == 1 else \
+                               "2D Fix" if fix_type == 2 else \
+                               "3D Fix" if fix_type == 3 else \
+                               f"Unknown Fix ({fix_type})"
+
+                logging.info(f"GPS: {fix_type_name} with {satellites} satellites")
+
+                if fix_type >= min_gps_fix:
+                    gps_check_passed = True
+                    break
+
+            time.sleep(0.2)
+
+        if not gps_check_passed:
+            failures.append(f"GPS fix type below minimum required (current: {fix_type_name}, required: 3D fix)")
+
+        # Check 3: Battery level
+        logging.info("Check 3: Verifying battery level...")
+        vehicle.mav.request_data_stream_send(
+            vehicle.target_system, vehicle.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1)
+
+        start_time = time.time()
+        battery_check_passed = False
+
+        while time.time() - start_time < 2:
+            msg = vehicle.recv_match(type='SYS_STATUS', blocking=False)
+            if msg:
+                battery_remaining = msg.battery_remaining
+                voltage = msg.voltage_battery / 1000.0  # Convert from mV to V
+
+                logging.info(f"Battery: {battery_remaining}% remaining, {voltage:.2f}V")
+
+                if battery_remaining >= min_battery:
+                    battery_check_passed = True
+                    break
+                elif battery_remaining < 0:
+                    # Some systems don't report battery percentage
+                    logging.warning("Battery percentage not available, skipping check")
+                    battery_check_passed = True
+                    break
+
+            time.sleep(0.2)
+
+        if not battery_check_passed:
+            failures.append(f"Battery level below minimum (current: {battery_remaining}%, required: {min_battery}%)")
+
+        # Check 4: Pre-arm status
+        logging.info("Check 4: Verifying pre-arm status...")
+        # Clear message buffer
+        while vehicle.recv_match(blocking=False):
+            pass
+
+        # Request status text messages
+        vehicle.mav.command_long_send(
+            vehicle.target_system, vehicle.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+            mavutil.mavlink.MAVLINK_MSG_ID_STATUSTEXT, 100000, 0, 0, 0, 0, 0)
+
+        start_time = time.time()
+        prearm_failures = []
+
+        while time.time() - start_time < 2:
+            msg = vehicle.recv_match(type='STATUSTEXT', blocking=False)
+            if msg and hasattr(msg, 'text'):
+                text = msg.text
+                if "PreArm" in text and "PreArm: All checks passing" not in text:
+                    prearm_failures.append(text)
+
+            time.sleep(0.1)
+
+        if prearm_failures:
+            failures.extend(prearm_failures)
+
+        # Check 5: Compass check (if enabled)
+        if check_compass:
+            logging.info("Check 5: Verifying compass calibration...")
+            vehicle.mav.request_data_stream_send(
+                vehicle.target_system, vehicle.target_component,
+                mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS, 2, 1)
+
+            # Look for compass-related failure messages
+            compass_failures = [f for f in prearm_failures if "compass" in f.lower()]
+
+            if compass_failures:
+                failures.extend(compass_failures)
+
+        # Result
+        if failures:
+            failure_message = "Pre-flight checks failed:\n- " + "\n- ".join(failures)
+            logging.warning(failure_message)
+            return False, failure_message
+        else:
+            logging.info("All pre-flight checks PASSED")
+            return True, "All checks passed"
+
+    except Exception as e:
+        error_msg = f"Error during pre-flight checks: {str(e)}"
+        logging.error(error_msg)
+        return False, error_msg
+
+# --- drone/navigation.py ---
+def safe_takeoff(vehicle, target_altitude, safety_checks=True, max_drift=2.0):
+    """
+    Takeoff with enhanced safety features including position holding.
+
+    Args:
+        vehicle: The connected mavlink object
+        target_altitude: Target altitude in meters
+        safety_checks: Whether to perform pre-flight safety checks
+        max_drift: Maximum allowed horizontal drift in meters
+
+    Returns:
+        True if takeoff was successful, False otherwise
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        # Run pre-flight checks if enabled
+        if safety_checks:
+            checks_passed, failure_reason = run_preflight_checks(vehicle)
+            if not checks_passed:
+                logging.error(f"Pre-flight checks failed: {failure_reason}")
+                return False
+
+        # Record the starting location for drift monitoring
+        start_location = get_location(vehicle)
+        if not start_location:
+            logging.error("Could not get starting location")
+            return False
+
+        logging.info(f"Starting location: Lat={start_location[0]}, Lon={start_location[1]}")
+
+        # Set to GUIDED mode
+        logging.info("Setting mode to GUIDED")
+        if not set_mode(vehicle, "GUIDED"):
+            logging.error("Failed to set GUIDED mode")
+            return False
+
+        # Arm the vehicle
+        logging.info("Arming vehicle")
+        if not arm_vehicle(vehicle, force=False):
+            logging.error("Failed to arm vehicle")
+            return False
+
+        # Start with a very slow, controlled takeoff
+        logging.info(f"Taking off to {target_altitude} meters with enhanced safety")
+
+        # Send takeoff command
+        vehicle.mav.command_long_send(
+            vehicle.target_system,
+            vehicle.target_component,
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            0,                  # Confirmation
+            0, 0, 0, 0, 0, 0,   # Params 1-6 (not used)
+            target_altitude     # Param 7: Altitude (in meters)
+        )
+
+        # Monitor ascent with more detailed feedback
+        start_time = time.time()
+        timeout = 60  # seconds timeout
+        prev_altitude = 0
+        stall_counter = 0
+
+        logging.info("Beginning ascent with position monitoring")
+
+        # Setup data streams for monitoring
+        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 5)
+        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD, 5)
+
+        while time.time() - start_time < timeout:
+            # Check altitude progress
+            altitude = get_altitude(vehicle)
+            if altitude is not None:
+                # Check for alt change (stall detection)
+                if abs(altitude - prev_altitude) < 0.05:
+                    stall_counter += 1
+                else:
+                    stall_counter = 0
+
+                if stall_counter > 10:
+                    logging.warning("Altitude stalled - takeoff may be interrupted")
+
+                prev_altitude = altitude
+                percent_complete = (altitude / target_altitude) * 100
+                logging.info(f"Altitude: {altitude:.2f}m ({percent_complete:.1f}% complete)")
+
+                # Check for drift
+                current_location = get_location(vehicle)
+                if current_location:
+                    drift = get_distance_metres(start_location, current_location)
+                    if drift > max_drift:
+                        logging.warning(f"Excessive horizontal drift detected: {drift:.1f}m")
+                        logging.warning("Attempting drift correction")
+
+                        # Calculate direction back to start
+                        start_lat, start_lon, _ = start_location
+                        current_lat, current_lon, _ = current_location
+
+                        # Simple position correction (in a real system, use a proper controller)
+                        north_correction = (start_lat - current_lat) * 1e7 * 1.113195  # rough m/deg at equator
+                        east_correction = (start_lon - current_lon) * 1e7 * 1.113195 * math.cos(math.radians(current_lat))
+
+                        # Scale corrections to appropriate velocity (max 0.5 m/s)
+                        correction_mag = math.sqrt(north_correction**2 + east_correction**2)
+                        if correction_mag > 0:
+                            scale = min(0.5, correction_mag) / correction_mag
+                            north_velocity = north_correction * scale
+                            east_velocity = east_correction * scale
+
+                            # Apply correction velocity
+                            send_ned_velocity(vehicle, north_velocity, east_velocity, 0, 1)
+                    else:
+                        logging.info(f"Horizontal position stable, drift: {drift:.1f}m")
+
+                # Check for target altitude reached
+                if altitude >= target_altitude * 0.95:
+                    logging.info(f"Reached target altitude: {altitude:.2f}m")
+
+                    # Final position hold for stability
+                    logging.info("Holding position for stability")
+                    time.sleep(2)
+
+                    return True
+
+            # Check if still armed
+            if not check_if_armed(vehicle):
+                logging.error("Vehicle disarmed during takeoff")
+                return False
+
+            time.sleep(1)
+
+        logging.warning("Takeoff timed out")
+        return False
+
+    except Exception as e:
+        logging.error(f"Error during safe takeoff: {str(e)}")
+
+        # Emergency RTL if something went wrong
+        try:
+            logging.warning("Attempting emergency return to launch")
+            return_to_launch(vehicle)
+        except:
+            pass
+
+        return False
+
+
+# --- drone/navigation.py ---
+def verify_orientation(vehicle, tolerance_deg=10):
+    """
+    Verify vehicle orientation is stable before takeoff.
+
+    Args:
+        vehicle: The connected mavlink object
+        tolerance_deg: Maximum tolerated degrees of rotation during check
+
+    Returns:
+        True if orientation is stable, False otherwise
+    """
+    try:
+        logging.info("Verifying orientation stability...")
+
+        # Request attitude data
+        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 10)
+
+        # Get initial attitude
+        msg = vehicle.recv_match(type='ATTITUDE', blocking=True, timeout=1)
+        if not msg:
+            logging.error("Could not get initial attitude data")
+            return False
+
+        initial_roll = math.degrees(msg.roll)
+        initial_pitch = math.degrees(msg.pitch)
+        initial_yaw = math.degrees(msg.yaw)
+
+        logging.info(f"Initial attitude: Roll={initial_roll:.1f}°, Pitch={initial_pitch:.1f}°, Yaw={initial_yaw:.1f}°")
+
+        # Monitor for changes over 2 seconds
+        start_time = time.time()
+        max_roll_change = 0
+        max_pitch_change = 0
+        max_yaw_change = 0
+
+        while time.time() - start_time < 2:
+            msg = vehicle.recv_match(type='ATTITUDE', blocking=False)
+            if msg:
+                roll = math.degrees(msg.roll)
+                pitch = math.degrees(msg.pitch)
+                yaw = math.degrees(msg.yaw)
+
+                roll_change = abs(roll - initial_roll)
+                pitch_change = abs(pitch - initial_pitch)
+
+                # Handle yaw wrap-around
+                yaw_change = min(abs(yaw - initial_yaw), 360 - abs(yaw - initial_yaw))
+
+                max_roll_change = max(max_roll_change, roll_change)
+                max_pitch_change = max(max_pitch_change, pitch_change)
+                max_yaw_change = max(max_yaw_change, yaw_change)
+
+            time.sleep(0.1)
+
+        logging.info(f"Maximum attitude changes: Roll={max_roll_change:.1f}°, Pitch={max_pitch_change:.1f}°, Yaw={max_yaw_change:.1f}°")
+
+        # Check if orientation was stable
+        orientation_stable = (max_roll_change < tolerance_deg and
+                              max_pitch_change < tolerance_deg and
+                              max_yaw_change < tolerance_deg)
+
+        if orientation_stable:
+            logging.info("Orientation is stable")
+        else:
+            logging.warning("Orientation unstable - vehicle may drift after takeoff")
+
+        return orientation_stable
+
+    except Exception as e:
+        logging.error(f"Error verifying orientation: {str(e)}")
+        return False
+
+def verify_position_hold(vehicle, duration=3, max_drift=0.5):
+    """
+    Verify vehicle can maintain position in GUIDED mode before takeoff.
+
+    Args:
+        vehicle: The connected mavlink object
+        duration: Duration to check position hold in seconds
+        max_drift: Maximum allowed drift in meters
+
+    Returns:
+        True if position hold is working, False otherwise
+    """
+    try:
+        logging.info(f"Verifying position hold capability for {duration} seconds...")
+
+        # Get initial position
+        initial_location = get_location(vehicle)
+        if not initial_location:
+            logging.error("Could not get initial location")
+            return False
+
+        # Monitor position for specified duration
+        start_time = time.time()
+        max_distance = 0
+
+        while time.time() - start_time < duration:
+            current_location = get_location(vehicle)
+            if current_location:
+                distance = get_distance_metres(initial_location, current_location)
+                max_distance = max(max_distance, distance)
+                logging.info(f"Current drift: {distance:.2f}m")
+
+            time.sleep(0.5)
+
+        position_stable = max_distance <= max_drift
+
+        if position_stable:
+            logging.info(f"Position hold is stable (max drift: {max_distance:.2f}m)")
+        else:
+            logging.warning(f"Position hold unstable - excessive drift detected: {max_distance:.2f}m")
+
+        return position_stable
+
+    except Exception as e:
+        logging.error(f"Error verifying position hold: {str(e)}")
+        return False

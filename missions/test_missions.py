@@ -12,7 +12,7 @@ from pymavlink import mavutil
 from drone.connection import get_vehicle_state, print_vehicle_state
 from drone.navigation import (
     arm_vehicle, disarm_vehicle, set_mode, arm_and_takeoff,
-    return_to_launch, check_if_armed, test_motors
+    return_to_launch, check_if_armed, test_motors, get_altitude, get_location
 )
 from detection.camera import test_camera_feed
 from detection.models import load_detection_model, test_detection_model
@@ -400,3 +400,201 @@ def test_all(vehicle, model_path, altitude=3, camera_id=0):
     results['all_passed'] = all(results.values())
 
     return results
+
+
+# --- missions/test_missions.py ---
+def test_incremental_takeoff(vehicle, max_altitude=3, increment=1):
+    """
+    Test takeoff in small increments with enhanced safety checks.
+
+    Args:
+        vehicle: The connected mavlink object
+        max_altitude: Maximum target altitude in meters
+        increment: Height increment in meters for each step
+
+    Returns:
+        True if test was successful, False otherwise
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.info("=== INCREMENTAL TAKEOFF TEST ===")
+
+        # Run comprehensive pre-flight checks
+        from drone.navigation import run_preflight_checks, verify_orientation
+
+        checks_passed, failure_reason = run_preflight_checks(vehicle)
+        if not checks_passed:
+            logging.error(f"Pre-flight checks failed: {failure_reason}")
+            return False
+
+        # Verify orientation is stable
+        if not verify_orientation(vehicle):
+            response = input("Orientation may be unstable. Proceed anyway? (y/n): ")
+            if response.lower() != 'y':
+                logging.info("Takeoff aborted by user")
+                return False
+
+        # Set to GUIDED mode
+        logging.info("Setting mode to GUIDED")
+        if not set_mode(vehicle, "GUIDED"):
+            logging.error("Failed to set GUIDED mode")
+            return False
+
+        # Arm the vehicle
+        logging.info("Arming vehicle")
+        if not arm_vehicle(vehicle):
+            logging.error("Failed to arm vehicle")
+            return False
+
+        # For the first takeoff, use a minimal altitude
+        first_altitude = min(1, increment)
+        logging.info(f"Initial takeoff to {first_altitude}m")
+
+        # Send takeoff command
+        vehicle.mav.command_long_send(
+            vehicle.target_system,
+            vehicle.target_component,
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            0,                  # Confirmation
+            0, 0, 0, 0, 0, 0,   # Params 1-6 (not used)
+            first_altitude      # Param 7: Altitude (in meters)
+        )
+
+        # Monitor initial takeoff
+        start_time = time.time()
+        timeout = 30  # seconds
+        reached_initial_altitude = False
+
+        while time.time() - start_time < timeout:
+            # Get altitude
+            altitude = get_altitude(vehicle)
+            if altitude is not None:
+                logging.info(f"Current altitude: {altitude:.2f}m")
+
+                # Check if reached initial altitude
+                if altitude >= first_altitude * 0.95:
+                    logging.info(f"Reached initial altitude of {altitude:.2f}m")
+                    reached_initial_altitude = True
+                    break
+
+            # Safe abort check
+            if not check_if_armed(vehicle):
+                logging.error("Vehicle disarmed during initial takeoff")
+                return False
+
+            time.sleep(1)
+
+        if not reached_initial_altitude:
+            logging.error("Failed to reach initial altitude")
+            return_to_launch(vehicle)
+            return False
+
+        # Safety pause for stability assessment
+        logging.info("Checking stability at initial altitude...")
+        time.sleep(3)
+
+        # Now increment altitude in steps
+        current_target = first_altitude
+
+        while current_target < max_altitude:
+            # Calculate next increment
+            next_target = min(current_target + increment, max_altitude)
+            logging.info(f"Incrementing altitude to {next_target}m")
+
+            # Command altitude change
+            vehicle.mav.command_long_send(
+                vehicle.target_system,
+                vehicle.target_component,
+                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                0,                  # Confirmation
+                0, 0, 0, 0, 0, 0,   # Params 1-6 (not used)
+                next_target         # Param 7: Altitude (in meters)
+            )
+
+            # Monitor ascent
+            start_time = time.time()
+            timeout = 30  # seconds
+            reached_next_altitude = False
+
+            while time.time() - start_time < timeout:
+                # Get altitude
+                altitude = get_altitude(vehicle)
+                if altitude is not None:
+                    logging.info(f"Current altitude: {altitude:.2f}m")
+
+                    # Check if reached next altitude
+                    if altitude >= next_target * 0.95:
+                        logging.info(f"Reached target altitude of {altitude:.2f}m")
+                        reached_next_altitude = True
+                        break
+
+                # Monitor position for drift
+                current_location = get_location(vehicle)
+
+                # Safe abort check
+                if not check_if_armed(vehicle):
+                    logging.error("Vehicle disarmed during ascent")
+                    return False
+
+                time.sleep(1)
+
+            if not reached_next_altitude:
+                logging.error(f"Failed to reach altitude {next_target}m")
+                return_to_launch(vehicle)
+                return False
+
+            # Update current target for next iteration
+            current_target = next_target
+
+            # Hover for stability at each increment
+            logging.info(f"Holding at {current_target}m altitude")
+            for i in range(5):
+                logging.info(f"Holding... {i+1}/5 seconds")
+                altitude = get_altitude(vehicle)
+                if altitude is not None:
+                    logging.info(f"Current altitude: {altitude:.2f}m")
+                time.sleep(1)
+
+        # Final hover at max altitude
+        logging.info(f"Reached maximum target altitude of {max_altitude}m")
+        logging.info("Hovering for 5 seconds")
+        time.sleep(5)
+
+        # Return to launch
+        logging.info("Test complete. Returning to launch")
+        if not return_to_launch(vehicle):
+            logging.error("Failed to return to launch")
+            return False
+
+        # Wait for landing
+        logging.info("Waiting for landing")
+        start_time = time.time()
+        while check_if_armed(vehicle) and time.time() - start_time < 60:
+            altitude = get_altitude(vehicle)
+            if altitude is not None:
+                logging.info(f"Altitude: {altitude:.2f}m")
+            time.sleep(1)
+
+        if check_if_armed(vehicle):
+            logging.warning("Vehicle still armed after RTL - trying manual disarm")
+            disarm_vehicle(vehicle)
+
+        logging.info("Incremental takeoff test completed successfully")
+        return True
+
+    except Exception as e:
+        logging.error(f"Error during incremental takeoff test: {str(e)}")
+
+        # Try to return to launch if there was an error
+        try:
+            logging.warning("Attempting emergency return to launch")
+            return_to_launch(vehicle)
+            time.sleep(5)
+            disarm_vehicle(vehicle)
+        except:
+            pass
+
+        return False

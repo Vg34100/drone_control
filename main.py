@@ -64,7 +64,9 @@ def main():
             "package-delivery",
             "package-drop",
             "target-localize",
-            "fix-mode"
+            "fix-mode",
+            "diagnostics",         # New command
+            "reset-controller"     # New command
         ],
         help="Mission to execute"
     )
@@ -143,6 +145,22 @@ def main():
                 logging.info("Successfully changed vehicle mode to LOITER")
             else:
                 logging.error("Failed to change vehicle mode")
+        elif args.mission == "diagnostics":
+            from drone.connection import get_vehicle_diagnostics
+            diagnostics = get_vehicle_diagnostics(vehicle, timeout=10)
+            if diagnostics:
+                success = True
+                logging.info("Diagnostics complete - see log for details")
+            else:
+                success = False
+                logging.error("Failed to get diagnostics")
+        elif args.mission == "reset-controller":
+            from drone.connection import reset_flight_controller
+            success = reset_flight_controller(vehicle)
+            if success:
+                logging.info("Reset command sent to flight controller")
+            else:
+                logging.error("Failed to send reset command")
 
         if success:
             logging.info(f"Mission '{args.mission}' completed successfully")

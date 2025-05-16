@@ -264,3 +264,144 @@ def wait_for_message(vehicle, message_type, timeout=5):
     except Exception as e:
         logging.error(f"Error waiting for message: {str(e)}")
         return None
+
+# --- drone/connection.py ---
+def get_vehicle_diagnostics(vehicle, timeout=10):
+    """
+    Get comprehensive diagnostics for the vehicle.
+
+    Args:
+        vehicle: The connected mavlink object
+        timeout: Maximum time to collect diagnostics in seconds
+
+    Returns:
+        Dictionary containing diagnostic information
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return None
+
+    try:
+        # Initialize diagnostics dictionary
+        diagnostics = {
+            "connection": {
+                "target_system": getattr(vehicle, 'target_system', 'Unknown'),
+                "target_component": getattr(vehicle, 'target_component', 'Unknown'),
+                "connection_string": getattr(vehicle, 'address', 'Unknown'),
+            },
+            "heartbeat_received": False,
+            "status_text_messages": [],
+            "pre_arm_status": [],
+            "gps_status": None,
+            "mode": None,
+            "armed": None,
+            "params_received": False,
+            "firmware_version": None
+        }
+
+        # Request parameters and system status
+        vehicle.mav.param_request_list_send(
+            getattr(vehicle, 'target_system', 1),
+            getattr(vehicle, 'target_component', 0)
+        )
+
+        # Request data streams
+        vehicle.mav.request_data_stream_send(
+            getattr(vehicle, 'target_system', 1),
+            getattr(vehicle, 'target_component', 0),
+            mavutil.mavlink.MAV_DATA_STREAM_ALL,
+            4,  # 4 Hz
+            1   # Start
+        )
+
+        # Collect messages for the specified timeout
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            msg = vehicle.recv_match(blocking=False)
+            if not msg:
+                time.sleep(0.1)
+                continue
+
+            msg_type = msg.get_type()
+
+            # Process message based on type
+            if msg_type == "HEARTBEAT":
+                diagnostics["heartbeat_received"] = True
+                diagnostics["armed"] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                try:
+                    if hasattr(mavutil, 'mode_string_v10') and callable(mavutil.mode_string_v10):
+                        diagnostics["mode"] = mavutil.mode_string_v10(msg)
+                    else:
+                        diagnostics["mode"] = f"Mode ID: {msg.custom_mode}"
+                except:
+                    diagnostics["mode"] = f"Mode ID: {msg.custom_mode}"
+
+            elif msg_type == "STATUSTEXT":
+                message_text = msg.text if hasattr(msg, 'text') else "Unknown status"
+                diagnostics["status_text_messages"].append(message_text)
+
+                # Check for pre-arm status
+                if "PreArm" in message_text:
+                    diagnostics["pre_arm_status"].append(message_text)
+
+            elif msg_type == "GPS_RAW_INT":
+                diagnostics["gps_status"] = {
+                    "fix_type": msg.fix_type,
+                    "satellites_visible": msg.satellites_visible
+                }
+
+            elif msg_type == "AUTOPILOT_VERSION":
+                # Extract version information
+                flight_sw_version = msg.flight_sw_version
+                major = (flight_sw_version >> 24) & 0xFF
+                minor = (flight_sw_version >> 16) & 0xFF
+                patch = (flight_sw_version >> 8) & 0xFF
+                diagnostics["firmware_version"] = f"{major}.{minor}.{patch}"
+
+            elif msg_type == "PARAM_VALUE":
+                diagnostics["params_received"] = True
+
+        return diagnostics
+    except Exception as e:
+        logging.error(f"Error getting vehicle diagnostics: {str(e)}")
+        return None
+
+# --- drone/connection.py ---
+def reset_flight_controller(vehicle):
+    """
+    Attempt to reset the flight controller.
+
+    Args:
+        vehicle: The connected mavlink object
+
+    Returns:
+        True if reset command was sent successfully, False otherwise
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.warning("Sending reboot command to flight controller")
+
+        # Send reboot command
+        target_system = getattr(vehicle, 'target_system', 1)
+        target_component = getattr(vehicle, 'target_component', 0)
+
+        vehicle.mav.command_long_send(
+            target_system,
+            target_component,
+            mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+            0,                  # Confirmation
+            1,                  # Param 1: 1=reboot autopilot
+            0,                  # Param 2: 0=do nothing for onboard computer
+            0,                  # Param 3: reserved
+            0,                  # Param 4: reserved
+            0, 0, 0             # Params 5-7 (not used)
+        )
+
+        logging.info("Reboot command sent. Wait for flight controller to restart.")
+        return True
+    except Exception as e:
+        logging.error(f"Error sending reboot command: {str(e)}")
+        return False

@@ -63,6 +63,7 @@ def main():
             # Test takeoff scripts
             "test-takeoff",
             "incremental-takeoff",      # New incremental takeoff test
+            "diamond-waypoints",
 
             "waypoint",
             "waypoint-detect",
@@ -230,7 +231,13 @@ def main():
             from drone.navigation import verify_position_hold
             success = verify_position_hold(vehicle)
 
-
+        elif args.mission == "diamond-waypoints":
+            from missions.waypoint import mission_diamond_precision
+            success = mission_diamond_precision(vehicle, args.altitude)
+            if success:
+                logging.info("Diamond waypoint mission completed successfully")
+            else:
+                logging.error("Diamond waypoint mission failed")
 
 
 

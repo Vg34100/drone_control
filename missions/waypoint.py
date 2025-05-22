@@ -361,3 +361,308 @@ def follow_mission_file(vehicle, mission_file):
     except Exception as e:
         logging.error(f"Error loading mission file: {str(e)}")
         return False
+
+
+def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, timeout=45, tolerance=1.0):
+    """
+    Blocking wait for waypoint arrival with real-time feedback.
+
+    Args:
+        vehicle: The connected mavlink object
+        target_lat: Target latitude
+        target_lon: Target longitude
+        timeout: Maximum time to wait in seconds
+        tolerance: Distance tolerance in meters
+
+    Returns:
+        True if waypoint reached, False if timeout
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.info(f"Navigating to waypoint: {target_lat:.7f}, {target_lon:.7f}")
+
+        # Request high-frequency position updates
+        vehicle.mav.request_data_stream_send(
+            vehicle.target_system,
+            vehicle.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_POSITION,
+            10,  # 10 Hz
+            1    # Start
+        )
+
+        start_time = time.time()
+        last_distance = None
+        stable_count = 0
+        required_stable_readings = 3
+        target_location = (target_lat, target_lon, 0)
+
+        print(f"\nNavigating to waypoint...")
+        print("Target: {:.7f}, {:.7f}".format(target_lat, target_lon))
+        print("-" * 60)
+
+        while time.time() - start_time < timeout:
+            # Get current position
+            current_location = get_location(vehicle)
+
+            if current_location:
+                current_lat, current_lon, current_alt = current_location
+
+                # Calculate distance to target
+                distance = get_distance_metres(current_location, target_location)
+
+                # Calculate bearing for reference
+                bearing = calculate_bearing(current_lat, current_lon, target_lat, target_lon)
+
+                # Check if within tolerance
+                if distance <= tolerance:
+                    stable_count += 1
+                    status = f"ARRIVED ({stable_count}/{required_stable_readings})"
+                else:
+                    stable_count = 0
+                    status = f"MOVING (bearing: {bearing:.0f}°)"
+
+                # Real-time display
+                timestamp = time.strftime("%H:%M:%S")
+                print(f"\r{timestamp} | Pos: {current_lat:.7f}, {current_lon:.7f} | Dist: {distance:6.2f}m | {status}", end="", flush=True)
+
+                # Check if we've reached waypoint with stability
+                if stable_count >= required_stable_readings:
+                    print(f"\n✓ WAYPOINT REACHED! (Final distance: {distance:.2f}m)")
+                    return True
+
+                last_distance = distance
+
+            # Safety check - ensure still armed and in correct mode
+            heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=False)
+            if heartbeat:
+                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                if not armed:
+                    print(f"\n✗ Vehicle disarmed during waypoint navigation!")
+                    return False
+
+            time.sleep(0.2)  # 200ms update rate
+
+        print(f"\n✗ Timeout reaching waypoint (final distance: {last_distance:.2f}m)" if last_distance else "\n✗ Timeout reaching waypoint")
+        return False
+
+    except Exception as e:
+        logging.error(f"Error waiting for waypoint: {str(e)}")
+        return False
+
+def calculate_bearing(lat1, lon1, lat2, lon2):
+    """
+    Calculate bearing from point 1 to point 2.
+
+    Returns:
+        Bearing in degrees (0-360)
+    """
+    import math
+
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    dlon_rad = math.radians(lon2 - lon1)
+
+    y = math.sin(dlon_rad) * math.cos(lat2_rad)
+    x = math.cos(lat1_rad) * math.sin(lat2_rad) - math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(dlon_rad)
+
+    bearing_rad = math.atan2(y, x)
+    bearing_deg = math.degrees(bearing_rad)
+
+    return (bearing_deg + 360) % 360
+
+def command_waypoint_precise(vehicle, target_lat, target_lon, altitude):
+    """
+    Send precise waypoint command using position target.
+
+    Args:
+        vehicle: The connected mavlink object
+        target_lat: Target latitude
+        target_lon: Target longitude
+        altitude: Target altitude in meters
+
+    Returns:
+        True if command sent successfully
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.info(f"Commanding waypoint: {target_lat:.7f}, {target_lon:.7f} at {altitude}m")
+
+        # Send position target
+        vehicle.mav.set_position_target_global_int_send(
+            0,  # time_boot_ms (not used)
+            vehicle.target_system,
+            vehicle.target_component,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            0b0000111111111000,  # type_mask (position only)
+            int(target_lat * 1e7),  # lat_int
+            int(target_lon * 1e7),  # lon_int
+            altitude,               # alt (meters)
+            0, 0, 0,               # vx, vy, vz (not used)
+            0, 0, 0,               # afx, afy, afz (not used)
+            0, 0                   # yaw, yaw_rate (not used)
+        )
+
+        return True
+
+    except Exception as e:
+        logging.error(f"Error sending waypoint command: {str(e)}")
+        return False
+
+    def mission_diamond_precision(vehicle, altitude=5):
+    """
+    Execute a precision diamond waypoint mission with blocking behavior.
+
+    Args:
+        vehicle: The connected mavlink object
+        altitude: Flight altitude in meters
+
+    Returns:
+        True if mission was successful, False otherwise
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.info("=== PRECISION DIAMOND WAYPOINT MISSION ===")
+        logging.info(f"Flight altitude: {altitude}m")
+
+        # Define diamond waypoints around your field
+        diamond_waypoints = [
+            (35.3482249, -119.1048284),  # HOME/North point
+            (35.3482019, -119.1049813),  # West point
+            (35.3481708, -119.1048297),  # South point
+            (35.3481795, -119.1046386),  # East point
+        ]
+
+        # Run pre-flight checks
+        from drone.navigation import run_preflight_checks
+        checks_passed, failure_reason = run_preflight_checks(vehicle)
+        if not checks_passed:
+            logging.error(f"Pre-flight checks failed: {failure_reason}")
+            return False
+
+        # Set to GUIDED mode
+        logging.info("Setting mode to GUIDED")
+        if not set_mode(vehicle, "GUIDED"):
+            logging.error("Failed to set GUIDED mode")
+            return False
+
+        # Arm and takeoff
+        logging.info(f"🚁 TAKEOFF: Arming and taking off to {altitude}m")
+        if not arm_and_takeoff(vehicle, altitude):
+            logging.error("Failed to arm and takeoff")
+            return False
+
+        # Get home location for reference
+        home_location = get_location(vehicle)
+        if home_location:
+            home_lat, home_lon, _ = home_location
+            logging.info(f"Home position: {home_lat:.7f}, {home_lon:.7f}")
+        else:
+            logging.warning("Could not get home location")
+
+        # Navigate to each waypoint in the diamond
+        for i, (waypoint_lat, waypoint_lon) in enumerate(diamond_waypoints, 1):
+            logging.info(f"\n📍 WAYPOINT {i}/{len(diamond_waypoints)}: Diamond Point {i}")
+
+            # Send waypoint command
+            if not command_waypoint_precise(vehicle, waypoint_lat, waypoint_lon, altitude):
+                logging.error(f"Failed to send waypoint {i} command")
+                return_to_launch(vehicle)
+                return False
+
+            # BLOCKING wait for waypoint arrival
+            if not wait_for_waypoint_blocking(vehicle, waypoint_lat, waypoint_lon, timeout=60, tolerance=1.5):
+                logging.error(f"Failed to reach waypoint {i}")
+                return_to_launch(vehicle)
+                return False
+
+            logging.info(f"✓ Successfully reached waypoint {i}")
+
+            # Brief pause at each waypoint (except the last one)
+            if i < len(diamond_waypoints):
+                logging.info("Stabilizing for 2 seconds...")
+                time.sleep(2)
+
+        # Quick pause at final waypoint
+        logging.info(f"\n🎯 DIAMOND COMPLETE: All {len(diamond_waypoints)} waypoints reached")
+        logging.info("Final stabilization for 1 second...")
+        time.sleep(1)
+
+        # Return to launch with blocking behavior
+        logging.info("\n🏠 RETURN TO LAUNCH")
+        logging.info("Commanding RTL...")
+
+        if not return_to_launch(vehicle):
+            logging.error("Failed to command RTL")
+            return False
+
+        # BLOCKING wait for landing with real-time feedback
+        logging.info("Monitoring return and landing...")
+        print("-" * 50)
+
+        landing_start = time.time()
+        landing_timeout = 90
+
+        while time.time() - landing_start < landing_timeout:
+            # Check armed status and altitude
+            heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+            if heartbeat:
+                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+
+                # Get current position and altitude
+                pos_msg = vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
+                if pos_msg:
+                    current_alt = pos_msg.relative_alt / 1000.0
+                    current_lat = pos_msg.lat / 1e7
+                    current_lon = pos_msg.lon / 1e7
+
+                    # Calculate distance to home if we have home location
+                    dist_to_home = "N/A"
+                    if home_location:
+                        current_pos = (current_lat, current_lon, current_alt)
+                        dist_to_home = f"{get_distance_metres(current_pos, home_location):.1f}m"
+                else:
+                    current_alt = None
+                    dist_to_home = "N/A"
+
+                timestamp = time.strftime("%H:%M:%S")
+                armed_status = "ARMED" if armed else "DISARMED"
+                alt_str = f"{current_alt:.3f}m" if current_alt is not None else "N/A"
+
+                print(f"\r{timestamp} | Status: {armed_status} | Alt: {alt_str} | Home Dist: {dist_to_home}", end="", flush=True)
+
+                if not armed:
+                    print(f"\n✓ LANDING COMPLETE - Vehicle disarmed")
+                    break
+
+            time.sleep(0.5)
+
+        # Final verification
+        time.sleep(1)
+        final_armed = check_if_armed(vehicle)
+        if final_armed:
+            logging.warning("Vehicle still armed after landing timeout - forcing disarm")
+            disarm_vehicle(vehicle)
+
+        logging.info("\n🎉 DIAMOND WAYPOINT MISSION COMPLETED SUCCESSFULLY")
+        return True
+
+    except Exception as e:
+        logging.error(f"Error during diamond waypoint mission: {str(e)}")
+        try:
+            logging.warning("Attempting emergency return to launch")
+            return_to_launch(vehicle)
+            time.sleep(10)
+            if check_if_armed(vehicle):
+                disarm_vehicle(vehicle)
+        except:
+            pass
+        return False

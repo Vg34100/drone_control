@@ -70,7 +70,8 @@ def main():
         "safety-check",             # New command to run safety checks only
         "orientation-check",        # New command to check orientation stability
         "incremental-takeoff",      # New incremental takeoff test
-        "position-hold-check"       # New command to test position holding
+        "position-hold-check",      # New command to test position holding
+        "check-altitude",           # New command for real-time altitude monitoring
         ],
         help="Mission to execute"
     )
@@ -195,6 +196,14 @@ def main():
         elif args.mission == "position-hold-check":
             from drone.navigation import verify_position_hold
             success = verify_position_hold(vehicle)
+        elif args.mission == "check-altitude":
+            from missions.test_missions import monitor_altitude_realtime
+            success = monitor_altitude_realtime(vehicle, duration=0)  # 0 = indefinite
+            if success:
+                logging.info("Altitude monitoring completed")
+            else:
+                logging.error("Altitude monitoring failed")
+
 
 
         if success:

@@ -9,7 +9,7 @@ import time
 import cv2
 from pymavlink import mavutil
 
-from drone.connection import get_vehicle_state, print_vehicle_state
+from drone.connection import get_vehicle_state, print_vehicle_state, request_message_interval
 from drone.navigation import (
     arm_vehicle, disarm_vehicle, set_mode, arm_and_takeoff,
     return_to_launch, check_if_armed, test_motors, get_altitude, get_location
@@ -597,4 +597,104 @@ def test_incremental_takeoff(vehicle, max_altitude=3, increment=1):
         except:
             pass
 
+        return False
+
+def monitor_altitude_realtime(vehicle, duration=0, update_interval=0.5):
+    """
+    Monitor and display real-time altitude data from multiple sources.
+
+    Args:
+        vehicle: The connected mavlink object
+        duration: Duration to monitor in seconds (0 = indefinite, Ctrl+C to stop)
+        update_interval: Update interval in seconds
+
+    Returns:
+        True if monitoring was successful, False otherwise
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.info("Starting real-time altitude monitoring")
+        logging.info("Press Ctrl+C to stop monitoring")
+
+        # Request altitude data streams
+        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 10)  # 10 Hz
+        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD, 5)  # 5 Hz
+        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, 2)  # 2 Hz
+
+        start_time = time.time()
+        last_update = 0
+
+        # Initialize altitude data
+        altitude_data = {
+            'relative_alt': None,
+            'absolute_alt': None,
+            'gps_alt': None,
+            'barometric_alt': None,
+            'armed': None,
+            'mode': None
+        }
+
+        print("\n" + "="*80)
+        print("REAL-TIME ALTITUDE MONITORING")
+        print("="*80)
+        print(f"{'Time':<10} | {'Armed':<6} | {'Mode':<10} | {'Rel Alt':<8} | {'Abs Alt':<8} | {'GPS Alt':<8} | {'Baro Alt':<8}")
+        print("-"*80)
+
+        while True:
+            # Check duration limit
+            if duration > 0 and (time.time() - start_time) > duration:
+                break
+
+            # Update at specified interval
+            current_time = time.time()
+            if current_time - last_update < update_interval:
+                time.sleep(0.1)
+                continue
+
+            last_update = current_time
+
+            # Collect messages
+            msg = vehicle.recv_match(blocking=False)
+            if msg:
+                msg_type = msg.get_type()
+
+                if msg_type == "GLOBAL_POSITION_INT":
+                    altitude_data['relative_alt'] = msg.relative_alt / 1000.0  # Convert mm to m
+                    altitude_data['absolute_alt'] = msg.alt / 1000.0  # Convert mm to m
+
+                elif msg_type == "VFR_HUD":
+                    altitude_data['barometric_alt'] = msg.alt
+
+                elif msg_type == "GPS_RAW_INT":
+                    altitude_data['gps_alt'] = msg.alt / 1000.0  # Convert mm to m
+
+                elif msg_type == "HEARTBEAT":
+                    altitude_data['armed'] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                    try:
+                        altitude_data['mode'] = mavutil.mode_string_v10(msg) if callable(mavutil.mode_string_v10) else "UNKNOWN"
+                    except:
+                        altitude_data['mode'] = "UNKNOWN"
+
+            # Display current data
+            timestamp = time.strftime("%H:%M:%S")
+            armed_str = "ARMED" if altitude_data['armed'] else "DISARM"
+            mode_str = altitude_data['mode'] or "N/A"
+            rel_alt_str = f"{altitude_data['relative_alt']:.2f}m" if altitude_data['relative_alt'] is not None else "N/A"
+            abs_alt_str = f"{altitude_data['absolute_alt']:.2f}m" if altitude_data['absolute_alt'] is not None else "N/A"
+            gps_alt_str = f"{altitude_data['gps_alt']:.2f}m" if altitude_data['gps_alt'] is not None else "N/A"
+            baro_alt_str = f"{altitude_data['barometric_alt']:.2f}m" if altitude_data['barometric_alt'] is not None else "N/A"
+
+            print(f"{timestamp:<10} | {armed_str:<6} | {mode_str:<10} | {rel_alt_str:<8} | {abs_alt_str:<8} | {gps_alt_str:<8} | {baro_alt_str:<8}")
+
+        print("\nAltitude monitoring stopped")
+        return True
+
+    except KeyboardInterrupt:
+        print("\nAltitude monitoring stopped by user")
+        return True
+    except Exception as e:
+        logging.error(f"Error during altitude monitoring: {str(e)}")
         return False

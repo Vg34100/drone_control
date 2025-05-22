@@ -603,130 +603,86 @@ def test_incremental_takeoff(vehicle, max_altitude=3, increment=1):
 
 def monitor_altitude_realtime(vehicle, duration=0, update_interval=0.2):
     """
-    Monitor and display real-time altitude data with improved accuracy.
+    Ultra-responsive altitude monitoring with minimal delay.
 
     Args:
         vehicle: The connected mavlink object
-        duration: Duration to monitor in seconds (0 = indefinite, Ctrl+C to stop)
-        update_interval: Update interval in seconds
+        duration: Duration to monitor in seconds (0 = indefinite)
 
     Returns:
-        True if monitoring was successful, False otherwise
+        True if monitoring completed successfully
     """
     if not vehicle:
         logging.error("No vehicle connection")
         return False
 
     try:
-        logging.info("Starting real-time altitude monitoring")
+        logging.info("Starting ULTRA-RESPONSIVE altitude monitoring")
         logging.info("Press Ctrl+C to stop monitoring")
 
-        # Clear any existing message buffer
-        while vehicle.recv_match(blocking=False):
-            pass
-
-        # Request high-frequency altitude data streams
+        # Request maximum frequency streams
         vehicle.mav.request_data_stream_send(
             vehicle.target_system,
             vehicle.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_POSITION,
-            10,  # 10 Hz
+            20,  # 20 Hz - maximum
             1    # Start
         )
-
-        vehicle.mav.request_data_stream_send(
-            vehicle.target_system,
-            vehicle.target_component,
-            mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
-            5,   # 5 Hz
-            1    # Start
-        )
-
-        # Also request specific messages
-        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 50000)  # 20 Hz (50ms)
-        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD, 100000)  # 10 Hz (100ms)
 
         start_time = time.time()
-        last_display = 0
+        last_altitude = None
+        message_count = 0
 
-        # Initialize altitude data
-        altitude_data = {
-            'relative_alt': 0.0,
-            'absolute_alt': 0.0,
-            'vfr_alt': 0.0,
-            'armed': False,
-            'mode': 'UNKNOWN',
-            'last_update': 0
-        }
-
-        print("\n" + "="*90)
-        print("REAL-TIME ALTITUDE MONITORING (High Frequency)")
-        print("="*90)
-        print(f"{'Time':<10} | {'Armed':<6} | {'Mode':<12} | {'Relative':<10} | {'Absolute':<10} | {'VFR/Baro':<10} | {'Status':<10}")
-        print("-"*90)
+        print("\n" + "="*80)
+        print("ULTRA-RESPONSIVE ALTITUDE MONITORING")
+        print("="*80)
+        print("Time       | Relative Alt | Change    | Messages | Status")
+        print("-"*80)
 
         while True:
-            # Check duration limit
             if duration > 0 and (time.time() - start_time) > duration:
                 break
 
-            # Continuously process messages
-            msg = vehicle.recv_match(blocking=False)
-            if msg:
-                msg_type = msg.get_type()
-                current_time = time.time()
+            # Process ALL available messages immediately
+            while True:
+                msg = vehicle.recv_match(blocking=False)
+                if not msg:
+                    break
 
-                if msg_type == "GLOBAL_POSITION_INT":
-                    altitude_data['relative_alt'] = msg.relative_alt / 1000.0  # Convert mm to m
-                    altitude_data['absolute_alt'] = msg.alt / 1000.0  # Convert mm to m
-                    altitude_data['last_update'] = current_time
+                message_count += 1
 
-                elif msg_type == "VFR_HUD":
-                    altitude_data['vfr_alt'] = msg.alt
+                if msg.get_type() == "GLOBAL_POSITION_INT":
+                    current_altitude = msg.relative_alt / 1000.0
+                    current_time = time.strftime("%H:%M:%S.%f")[:-3]
 
-                elif msg_type == "HEARTBEAT":
-                    altitude_data['armed'] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
-                    try:
-                        if callable(mavutil.mode_string_v10):
-                            altitude_data['mode'] = mavutil.mode_string_v10(msg)
-                        else:
-                            altitude_data['mode'] = f"ID:{msg.custom_mode}"
-                    except:
-                        altitude_data['mode'] = f"ID:{msg.custom_mode}"
+                    # Calculate change
+                    change_str = "---"
+                    if last_altitude is not None:
+                        change = current_altitude - last_altitude
+                        if abs(change) > 0.001:  # Only show significant changes
+                            change_str = f"{change:+.3f}m"
 
-            # Display at specified interval
-            current_time = time.time()
-            if current_time - last_display >= update_interval:
-                last_display = current_time
+                    # Determine status based on change rate
+                    if last_altitude is None:
+                        status = "INIT"
+                    elif abs(current_altitude - last_altitude) > 0.01:
+                        status = "MOVING"
+                    else:
+                        status = "STABLE"
 
-                # Format display data
-                timestamp = time.strftime("%H:%M:%S")
-                armed_str = "ARMED" if altitude_data['armed'] else "DISARM"
-                mode_str = altitude_data['mode'][:11]  # Truncate if too long
-                rel_alt_str = f"{altitude_data['relative_alt']:.3f}m"
-                abs_alt_str = f"{altitude_data['absolute_alt']:.3f}m"
-                vfr_alt_str = f"{altitude_data['vfr_alt']:.3f}m"
+                    print(f"{current_time:<10} | {current_altitude:>9.3f}m | {change_str:>9} | {message_count:>8} | {status}")
 
-                # Status indicator
-                data_age = current_time - altitude_data['last_update']
-                if data_age < 1.0:
-                    status = "LIVE"
-                elif data_age < 3.0:
-                    status = "DELAYED"
-                else:
-                    status = "STALE"
+                    last_altitude = current_altitude
 
-                print(f"{timestamp:<10} | {armed_str:<6} | {mode_str:<12} | {rel_alt_str:<10} | {abs_alt_str:<10} | {vfr_alt_str:<10} | {status:<10}")
+            # Very minimal sleep - just enough to prevent 100% CPU
+            time.sleep(0.001)  # 1ms
 
-            # Small sleep to prevent excessive CPU usage
-            time.sleep(0.01)
-
-        print("\nAltitude monitoring stopped")
+        print("\nUltra-responsive monitoring stopped")
         return True
 
     except KeyboardInterrupt:
-        print("\nAltitude monitoring stopped by user")
+        print("\nUltra-responsive monitoring stopped by user")
         return True
     except Exception as e:
-        logging.error(f"Error during altitude monitoring: {str(e)}")
+        logging.error(f"Error during ultra-responsive monitoring: {str(e)}")
         return False

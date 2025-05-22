@@ -53,26 +53,36 @@ def main():
     parser.add_argument(
         "mission",
         choices=[
-            "test-connection",
-            "test-arm",
-            "test-takeoff",
-            "test-camera",
+            "test-connection",      # Test connection to the vehicle and runs diagnostics
+            "preflight-all",        # Run all preflight checks (connection, arm, motors, and preflight tests)
+            "test-arm",             # Test arming the vehicle
+            "test-motor",           # Test each motor functionality
+            "test-camera",          # Test camera functionality
             "test-detect",
-            "test-motor",
+
+            # Test takeoff scripts
+            "test-takeoff",
+            "incremental-takeoff",      # New incremental takeoff test
+
             "waypoint",
             "waypoint-detect",
             "package-delivery",
             "package-drop",
             "target-localize",
-            "fix-mode",
-            "diagnostics",         # New command
-            "reset-controller",     # New command
-        "safety-check",             # New command to run safety checks only
-        "orientation-check",        # New command to check orientation stability
-        "incremental-takeoff",      # New incremental takeoff test
-        "position-hold-check",      # New command to test position holding
-        "check-altitude",           # New command for real-time altitude monitoring
-        "test-important",
+
+            # Fixes
+            "fix-mode",             # Fix the mode after RTL if necessary
+
+            "diagnostics",          # New command
+            "reset-controller",     # Resets the flight controller
+
+            # Preflight
+            "safety-check",             # To run safety checks only
+            "orientation-check",        # To check orientation stability
+            "position-hold-check",      # To test position holding
+
+            "check-altitude",           # Real-time altitude monitoring
+
         ],
         help="Mission to execute"
     )
@@ -204,7 +214,7 @@ def main():
                 logging.info("Altitude monitoring completed")
             else:
                 logging.error("Altitude monitoring failed")
-        elif args.mission == "test-important":
+        elif args.mission == "preflight-all":
             success = test_connection(vehicle)
             time.sleep(2)
             success = test_arm(vehicle)

@@ -695,7 +695,7 @@ def wait_for_altitude_blocking(vehicle, target_altitude, timeout=30, tolerance=0
                 # Check if we've reached target altitude with stability
                 if stable_count >= required_stable_readings:
                     print(f"\n✓ REACHED {target_altitude}m! (Final: {current_altitude:.3f}m)")
-                    play_beep()
+                    # play_beep()
                     return True
 
                 last_altitude = current_altitude
@@ -710,7 +710,8 @@ def wait_for_altitude_blocking(vehicle, target_altitude, timeout=30, tolerance=0
 
             time.sleep(0.05)  # 50ms update rate
 
-        print(f"\n✗ Timeout waiting for altitude {target_altitude}m (current: {last_altitude:.3f}m if last_altitude else 'unknown'})")
+
+        print(f"\n✗ Timeout waiting for altitude {target_altitude}m (current: {f'{last_altitude:.3f}m' if last_altitude else 'unknown'})")
         return False
 
     except Exception as e:

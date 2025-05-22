@@ -405,7 +405,7 @@ def test_all(vehicle, model_path, altitude=3, camera_id=0):
 # --- missions/test_missions.py ---
 def test_incremental_takeoff(vehicle, max_altitude=3, increment=1):
     """
-    Test takeoff in small increments with enhanced safety checks.
+    Test takeoff in small increments with blocking behavior and audio feedback.
 
     Args:
         vehicle: The connected mavlink object
@@ -420,22 +420,16 @@ def test_incremental_takeoff(vehicle, max_altitude=3, increment=1):
         return False
 
     try:
-        logging.info("=== INCREMENTAL TAKEOFF TEST ===")
+        logging.info("=== BLOCKING INCREMENTAL TAKEOFF TEST ===")
+        logging.info(f"Target: {max_altitude}m in {increment}m increments")
 
         # Run comprehensive pre-flight checks
-        from drone.navigation import run_preflight_checks, verify_orientation
+        from drone.navigation import run_preflight_checks
 
         checks_passed, failure_reason = run_preflight_checks(vehicle)
         if not checks_passed:
             logging.error(f"Pre-flight checks failed: {failure_reason}")
             return False
-
-        # Verify orientation is stable
-        if not verify_orientation(vehicle):
-            response = input("Orientation may be unstable. Proceed anyway? (y/n): ")
-            if response.lower() != 'y':
-                logging.info("Takeoff aborted by user")
-                return False
 
         # Set to GUIDED mode
         logging.info("Setting mode to GUIDED")
@@ -444,160 +438,286 @@ def test_incremental_takeoff(vehicle, max_altitude=3, increment=1):
             return False
 
         # Arm the vehicle
-        logging.info("Arming vehicle")
+        logging.info("Arming vehicle...")
         if not arm_vehicle(vehicle):
             logging.error("Failed to arm vehicle")
             return False
 
-        # For the first takeoff, use a minimal altitude
-        first_altitude = min(1, increment)
-        logging.info(f"Initial takeoff to {first_altitude}m")
+        # Wait for altitude to reset after arming
+        logging.info("Waiting 2 seconds for altitude sensor to stabilize...")
+        time.sleep(2)
 
-        # Send takeoff command
+        # Get baseline altitude
+        baseline_msg = vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=3)
+        if baseline_msg:
+            baseline_altitude = baseline_msg.relative_alt / 1000.0
+            logging.info(f"Baseline altitude: {baseline_altitude:.3f}m")
+        else:
+            logging.warning("Could not get baseline altitude, proceeding anyway")
+            baseline_altitude = 0.0
+
+        # Initial takeoff to first increment
+        first_target = increment
+        logging.info(f"\n🚁 STEP 1: Initial takeoff to {first_target}m")
+
+        # Send initial takeoff command
         vehicle.mav.command_long_send(
             vehicle.target_system,
             vehicle.target_component,
             mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
             0,                  # Confirmation
             0, 0, 0, 0, 0, 0,   # Params 1-6 (not used)
-            first_altitude      # Param 7: Altitude (in meters)
+            first_target        # Param 7: Altitude (in meters)
         )
 
-        # Monitor initial takeoff
-        start_time = time.time()
-        timeout = 30  # seconds
-        reached_initial_altitude = False
-
-        while time.time() - start_time < timeout:
-            # Get altitude
-            altitude = get_altitude(vehicle)
-            if altitude is not None:
-                logging.info(f"Current altitude: {altitude:.2f}m")
-
-                # Check if reached initial altitude
-                if altitude >= first_altitude * 0.95:
-                    logging.info(f"Reached initial altitude of {altitude:.2f}m")
-                    reached_initial_altitude = True
-                    break
-
-            # Safe abort check
-            if not check_if_armed(vehicle):
-                logging.error("Vehicle disarmed during initial takeoff")
-                return False
-
-            time.sleep(1)
-
-        if not reached_initial_altitude:
-            logging.error("Failed to reach initial altitude")
+        # BLOCKING wait for first altitude
+        if not wait_for_altitude_blocking(vehicle, first_target, timeout=40, tolerance=0.15):
+            logging.error(f"Failed to reach initial altitude {first_target}m")
             return_to_launch(vehicle)
             return False
 
-        # Safety pause for stability assessment
-        logging.info("Checking stability at initial altitude...")
-        time.sleep(3)
+        logging.info(f"✓ Successfully reached {first_target}m")
+        logging.info("Stabilizing for 2 seconds...")
+        time.sleep(2)
 
-        # Now increment altitude in steps
-        current_target = first_altitude
+        # Incremental altitude increases
+        current_target = first_target
 
         while current_target < max_altitude:
-            # Calculate next increment
             next_target = min(current_target + increment, max_altitude)
-            logging.info(f"Incrementing altitude to {next_target}m")
+            step_number = int(next_target / increment) + 1
 
-            # Command altitude change
-            vehicle.mav.command_long_send(
-                vehicle.target_system,
-                vehicle.target_component,
-                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-                0,                  # Confirmation
-                0, 0, 0, 0, 0, 0,   # Params 1-6 (not used)
-                next_target         # Param 7: Altitude (in meters)
-            )
+            logging.info(f"\n🚁 STEP {step_number}: Climbing to {next_target}m")
 
-            # Monitor ascent
-            start_time = time.time()
-            timeout = 30  # seconds
-            reached_next_altitude = False
+            # Send altitude command
+            if not command_altitude_precise(vehicle, next_target):
+                logging.error(f"Failed to send altitude command for {next_target}m")
+                return_to_launch(vehicle)
+                return False
 
-            while time.time() - start_time < timeout:
-                # Get altitude
-                altitude = get_altitude(vehicle)
-                if altitude is not None:
-                    logging.info(f"Current altitude: {altitude:.2f}m")
-
-                    # Check if reached next altitude
-                    if altitude >= next_target * 0.95:
-                        logging.info(f"Reached target altitude of {altitude:.2f}m")
-                        reached_next_altitude = True
-                        break
-
-                # Monitor position for drift
-                current_location = get_location(vehicle)
-
-                # Safe abort check
-                if not check_if_armed(vehicle):
-                    logging.error("Vehicle disarmed during ascent")
-                    return False
-
-                time.sleep(1)
-
-            if not reached_next_altitude:
+            # BLOCKING wait for next altitude
+            if not wait_for_altitude_blocking(vehicle, next_target, timeout=30, tolerance=0.15):
                 logging.error(f"Failed to reach altitude {next_target}m")
                 return_to_launch(vehicle)
                 return False
 
-            # Update current target for next iteration
+            logging.info(f"✓ Successfully reached {next_target}m")
             current_target = next_target
 
-            # Hover for stability at each increment
-            logging.info(f"Holding at {current_target}m altitude")
-            for i in range(5):
-                logging.info(f"Holding... {i+1}/5 seconds")
-                altitude = get_altitude(vehicle)
-                if altitude is not None:
-                    logging.info(f"Current altitude: {altitude:.2f}m")
-                time.sleep(1)
+            # Stabilization pause between increments
+            if current_target < max_altitude:
+                logging.info("Stabilizing for 2 seconds...")
+                time.sleep(2)
 
-        # Final hover at max altitude
-        logging.info(f"Reached maximum target altitude of {max_altitude}m")
-        logging.info("Hovering for 5 seconds")
+        # Final hover at maximum altitude
+        logging.info(f"\n🎯 FINAL: Reached maximum altitude of {max_altitude}m")
+        logging.info("Final hover for 5 seconds...")
         time.sleep(5)
 
-        # Return to launch
-        logging.info("Test complete. Returning to launch")
+        # Return to launch with blocking behavior
+        logging.info("\n🏠 RETURN TO LAUNCH")
+        logging.info("Commanding RTL...")
+
         if not return_to_launch(vehicle):
-            logging.error("Failed to return to launch")
+            logging.error("Failed to command RTL")
             return False
 
-        # Wait for landing
-        logging.info("Waiting for landing")
-        start_time = time.time()
-        while check_if_armed(vehicle) and time.time() - start_time < 60:
-            altitude = get_altitude(vehicle)
-            if altitude is not None:
-                logging.info(f"Altitude: {altitude:.2f}m")
-            time.sleep(1)
+        # BLOCKING wait for landing with real-time feedback
+        logging.info("Monitoring descent and landing...")
+        print("-" * 50)
 
-        if check_if_armed(vehicle):
-            logging.warning("Vehicle still armed after RTL - trying manual disarm")
+        landing_start = time.time()
+        landing_timeout = 90  # 90 seconds for landing
+
+        while time.time() - landing_start < landing_timeout:
+            # Check if still armed (landing complete when disarmed)
+            heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+            if heartbeat:
+                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+
+                # Get current altitude
+                pos_msg = vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
+                current_alt = pos_msg.relative_alt / 1000.0 if pos_msg else None
+
+                timestamp = time.strftime("%H:%M:%S")
+                armed_status = "ARMED" if armed else "DISARMED"
+                alt_str = f"{current_alt:.3f}m" if current_alt is not None else "N/A"
+
+                print(f"\r{timestamp} | Status: {armed_status} | Altitude: {alt_str}", end="", flush=True)
+
+                if not armed:
+                    print(f"\n✓ LANDING COMPLETE - Vehicle disarmed")
+                    # play_beep()
+                    break
+
+                # Also check if very close to ground
+                if current_alt is not None and current_alt < 0.3:
+                    print(f"\n✓ NEAR GROUND - Altitude: {current_alt:.3f}m")
+
+            time.sleep(0.5)
+
+        # Final verification
+        time.sleep(2)
+        final_armed = check_if_armed(vehicle)
+        if final_armed:
+            logging.warning("Vehicle still armed after landing timeout - forcing disarm")
             disarm_vehicle(vehicle)
 
-        logging.info("Incremental takeoff test completed successfully")
+        logging.info("\n🎉 INCREMENTAL TAKEOFF TEST COMPLETED SUCCESSFULLY")
         return True
 
     except Exception as e:
         logging.error(f"Error during incremental takeoff test: {str(e)}")
-
-        # Try to return to launch if there was an error
         try:
             logging.warning("Attempting emergency return to launch")
             return_to_launch(vehicle)
-            time.sleep(5)
-            disarm_vehicle(vehicle)
+            time.sleep(10)
+            if check_if_armed(vehicle):
+                disarm_vehicle(vehicle)
         except:
             pass
-
         return False
+
+def command_altitude_precise(vehicle, target_altitude):
+    """
+    Send precise altitude command using position target.
+
+    Args:
+        vehicle: The connected mavlink object
+        target_altitude: Target altitude in meters
+
+    Returns:
+        True if command sent successfully
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        # Get current location for position hold
+        current_location = get_location(vehicle)
+        if not current_location:
+            logging.error("Could not get current location for altitude command")
+            return False
+
+        lat, lon, _ = current_location
+
+        logging.info(f"Commanding altitude change to {target_altitude}m")
+
+        # Send position target with only altitude change
+        vehicle.mav.set_position_target_global_int_send(
+            0,  # time_boot_ms (not used)
+            vehicle.target_system,
+            vehicle.target_component,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            0b0000111111111000,  # type_mask (only alt enabled, position and velocity ignored)
+            int(lat * 1e7),      # lat_int
+            int(lon * 1e7),      # lon_int
+            target_altitude,     # alt (meters)
+            0, 0, 0,            # vx, vy, vz (not used)
+            0, 0, 0,            # afx, afy, afz (not used)
+            0, 0                # yaw, yaw_rate (not used)
+        )
+
+        return True
+
+    except Exception as e:
+        logging.error(f"Error sending altitude command: {str(e)}")
+        return False
+
+def wait_for_altitude_blocking(vehicle, target_altitude, timeout=30, tolerance=0.1):
+    """
+    Blocking wait for altitude with real-time feedback and audio notification.
+
+    Args:
+        vehicle: The connected mavlink object
+        target_altitude: Target altitude in meters
+        timeout: Maximum time to wait in seconds
+        tolerance: Altitude tolerance in meters
+
+    Returns:
+        True if altitude reached, False if timeout
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.info(f"Waiting for altitude {target_altitude}m (tolerance: ±{tolerance}m)")
+
+        # Request high-frequency altitude updates
+        vehicle.mav.request_data_stream_send(
+            vehicle.target_system,
+            vehicle.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_POSITION,
+            20,  # 20 Hz
+            1    # Start
+        )
+
+        start_time = time.time()
+        last_altitude = None
+        stable_count = 0
+        required_stable_readings = 3  # Need 3 consecutive readings within tolerance
+
+        print(f"\nWaiting for altitude {target_altitude}m...")
+        print("-" * 50)
+
+        while time.time() - start_time < timeout:
+            # Get the most recent altitude reading
+            current_altitude = None
+
+            # Process recent messages to get latest altitude
+            for _ in range(10):  # Check up to 10 recent messages
+                msg = vehicle.recv_match(blocking=False)
+                if msg and msg.get_type() == "GLOBAL_POSITION_INT":
+                    current_altitude = msg.relative_alt / 1000.0
+
+            if current_altitude is not None:
+                # Calculate how close we are to target
+                altitude_diff = abs(current_altitude - target_altitude)
+                progress_percent = min(100, (current_altitude / target_altitude) * 100) if target_altitude > 0 else 0
+
+                # Check if within tolerance
+                if altitude_diff <= tolerance:
+                    stable_count += 1
+                    status = f"STABLE ({stable_count}/{required_stable_readings})"
+                else:
+                    stable_count = 0
+                    if current_altitude < target_altitude:
+                        status = "CLIMBING"
+                    else:
+                        status = "DESCENDING"
+
+                # Real-time display
+                timestamp = time.strftime("%H:%M:%S")
+                print(f"\r{timestamp} | Alt: {current_altitude:6.3f}m | Target: {target_altitude:6.3f}m | Diff: {altitude_diff:+6.3f}m | {progress_percent:5.1f}% | {status}", end="", flush=True)
+
+                # Check if we've reached target altitude with stability
+                if stable_count >= required_stable_readings:
+                    print(f"\n✓ REACHED {target_altitude}m! (Final: {current_altitude:.3f}m)")
+                    play_beep()
+                    return True
+
+                last_altitude = current_altitude
+
+            # Safety check - ensure still armed
+            heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=False)
+            if heartbeat:
+                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                if not armed:
+                    print(f"\n✗ Vehicle disarmed during altitude wait!")
+                    return False
+
+            time.sleep(0.05)  # 50ms update rate
+
+        print(f"\n✗ Timeout waiting for altitude {target_altitude}m (current: {last_altitude:.3f}m if last_altitude else 'unknown'})")
+        return False
+
+    except Exception as e:
+        logging.error(f"Error waiting for altitude: {str(e)}")
+        return False
+#
+
 
 
 

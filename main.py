@@ -66,7 +66,7 @@ def main():
             "target-localize",
             "fix-mode",
             "diagnostics",         # New command
-            "reset-controller"     # New command
+            "reset-controller",     # New command
         "safety-check",             # New command to run safety checks only
         "orientation-check",        # New command to check orientation stability
         "incremental-takeoff",      # New incremental takeoff test

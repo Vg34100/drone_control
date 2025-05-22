@@ -194,7 +194,7 @@ def main():
 
         elif args.mission == "position-hold-check":
             from drone.navigation import verify_position_hold
-            success = verify_position_hold(vehicle
+            success = verify_position_hold(vehicle)
 
 
         if success:

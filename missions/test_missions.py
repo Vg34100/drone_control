@@ -703,7 +703,7 @@ def wait_for_altitude_blocking(vehicle, target_altitude, timeout=30, tolerance=0
             # Safety check - ensure still armed
             heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=False)
             if heartbeat:
-                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                armed = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 if not armed:
                     print(f"\n✗ Vehicle disarmed during altitude wait!")
                     return False

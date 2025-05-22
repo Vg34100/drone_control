@@ -72,6 +72,7 @@ def main():
         "incremental-takeoff",      # New incremental takeoff test
         "position-hold-check",      # New command to test position holding
         "check-altitude",           # New command for real-time altitude monitoring
+        "test-important",
         ],
         help="Mission to execute"
     )
@@ -80,7 +81,7 @@ def main():
     parser.add_argument(
         "--altitude",
         type=float,
-        default=10.0,
+        default=3.0,
         help="Target altitude in meters"
     )
     parser.add_argument(
@@ -193,7 +194,7 @@ def main():
             from missions.test_missions import test_incremental_takeoff
             success = test_incremental_takeoff(vehicle, args.altitude, args.increment)
 
-        elif args.mission == "position-hold-check":
+        elif args.mission == "position-hold-check" :
             from drone.navigation import verify_position_hold
             success = verify_position_hold(vehicle)
         elif args.mission == "check-altitude":
@@ -203,6 +204,23 @@ def main():
                 logging.info("Altitude monitoring completed")
             else:
                 logging.error("Altitude monitoring failed")
+        elif args.mission == "test-important":
+            success = test_connection(vehicle)
+            time.sleep(2)
+            success = test_arm(vehicle)
+            time.sleep(2)
+            success = test_motor(vehicle, args.throttle)
+            time.sleep(2)
+            from drone.navigation import run_preflight_checks
+            checks_passed, failure_reason = run_preflight_checks(vehicle)
+            time.sleep(2)
+            from drone.navigation import verify_orientation
+            success = verify_orientation(vehicle)
+            time.sleep(2)
+            from drone.navigation import verify_position_hold
+            success = verify_position_hold(vehicle)
+
+
 
 
 

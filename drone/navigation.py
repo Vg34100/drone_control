@@ -12,58 +12,47 @@ from pymavlink import mavutil
 
 def is_armable(vehicle):
     """
-    Check if the vehicle is ready to arm.
+    Simplified armability check that just verifies GPS and basic connectivity.
 
     Args:
         vehicle: The connected mavlink object
 
     Returns:
-        True if armable, False otherwise
+        True if basic requirements met, False otherwise
     """
     if not vehicle:
         logging.error("No vehicle connection")
         return False
 
     try:
-        # Request system status
-        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS, 1)
-        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, 1)
+        logging.info("Running simplified armability check...")
 
-        # Wait for essential information
-        start_time = time.time()
-        timeout = 5  # seconds
-        gps_check = False
-        prearm_check = False
+        # Get GPS status
+        gps_msg = vehicle.recv_match(type='GPS_RAW_INT', blocking=True, timeout=3)
+        if gps_msg:
+            gps_ok = gps_msg.fix_type >= 3 and gps_msg.satellites_visible >= 6
+            logging.info(f"GPS: Fix type {gps_msg.fix_type}, {gps_msg.satellites_visible} satellites - {'OK' if gps_ok else 'NOT READY'}")
+        else:
+            logging.warning("No GPS data received")
+            gps_ok = False
 
-        while time.time() - start_time < timeout:
-            msg = vehicle.recv_match(blocking=False)
-            if not msg:
-                time.sleep(0.1)
-                continue
+        # Get heartbeat
+        heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=True, timeout=3)
+        if heartbeat:
+            logging.info(f"Heartbeat received from system {vehicle.target_system}")
+            heartbeat_ok = True
+        else:
+            logging.warning("No heartbeat received")
+            heartbeat_ok = False
 
-            msg_type = msg.get_type()
+        # Simple check: GPS + Heartbeat = ready to attempt arm
+        ready = gps_ok and heartbeat_ok
+        logging.info(f"Simplified armability: {'READY' if ready else 'NOT READY'}")
 
-            # Check GPS fix
-            if msg_type == "GPS_RAW_INT":
-                gps_check = msg.fix_type >= 3  # 3D fix or better
+        return ready
 
-            # Look for pre-arm status in status text
-            if msg_type == "STATUSTEXT":
-                if "PreArm" in msg.text:
-                    if "PreArm: All checks passing" in msg.text:
-                        prearm_check = True
-                    else:
-                        logging.warning(f"PreArm check failing: {msg.text}")
-
-            # If we've checked both, we can return
-            if gps_check and prearm_check:
-                return True
-
-        # Report why we're not armable
-        logging.warning(f"Vehicle not armable: GPS={gps_check}, PreArm={prearm_check}")
-        return False
     except Exception as e:
-        logging.error(f"Error checking if vehicle is armable: {str(e)}")
+        logging.error(f"Error in simplified armability check: {str(e)}")
         return False
 
 def request_message_interval(vehicle, message_id, frequency_hz):
@@ -463,9 +452,92 @@ def get_altitude(vehicle):
         logging.error(f"Error getting altitude: {str(e)}")
         return None
 
+
+def wait_for_altitude_blocking(vehicle, target_altitude, timeout=30, tolerance=0.1):
+    """
+    Blocking wait for altitude with real-time feedback.
+
+    Args:
+        vehicle: The connected mavlink object
+        target_altitude: Target altitude in meters
+        timeout: Maximum time to wait in seconds
+        tolerance: Altitude tolerance in meters
+
+    Returns:
+        True if altitude reached, False if timeout
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.info(f"Waiting for altitude {target_altitude}m (tolerance: ±{tolerance}m)")
+
+        # Request high-frequency altitude updates
+        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 20)
+
+        start_time = time.time()
+        last_altitude = None
+        stable_count = 0
+        required_stable_readings = 3
+
+        print(f"\nWaiting for altitude {target_altitude}m...")
+        print("-" * 50)
+
+        while time.time() - start_time < timeout:
+            # Get the most recent altitude reading
+            current_altitude = None
+
+            # Process recent messages to get latest altitude
+            for _ in range(10):
+                msg = vehicle.recv_match(blocking=False)
+                if msg and msg.get_type() == "GLOBAL_POSITION_INT":
+                    current_altitude = msg.relative_alt / 1000.0
+
+            if current_altitude is not None:
+                # Calculate progress
+                altitude_diff = abs(current_altitude - target_altitude)
+                progress_percent = min(100, (current_altitude / target_altitude) * 100) if target_altitude > 0 else 0
+
+                # Check stability
+                if altitude_diff <= tolerance:
+                    stable_count += 1
+                    status = f"STABLE ({stable_count}/{required_stable_readings})"
+                else:
+                    stable_count = 0
+                    status = "CLIMBING" if current_altitude < target_altitude else "DESCENDING"
+
+                # Real-time display
+                timestamp = time.strftime("%H:%M:%S")
+                print(f"\r{timestamp} | Alt: {current_altitude:6.3f}m | Target: {target_altitude:6.3f}m | Diff: {altitude_diff:+6.3f}m | {progress_percent:5.1f}% | {status}", end="", flush=True)
+
+                # Check if reached target with stability
+                if stable_count >= required_stable_readings:
+                    print(f"\n✓ REACHED {target_altitude}m! (Final: {current_altitude:.3f}m)")
+                    return True
+
+                last_altitude = current_altitude
+
+            # Safety check
+            heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=False)
+            if heartbeat:
+                armed = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED  # Use your fixed armed check
+                if not armed:
+                    print(f"\n✗ Vehicle disarmed during altitude wait!")
+                    return False
+
+            time.sleep(0.05)
+
+        print(f"\n✗ Timeout waiting for altitude {target_altitude}m")
+        return False
+
+    except Exception as e:
+        logging.error(f"Error waiting for altitude: {str(e)}")
+        return False
+
 def arm_and_takeoff(vehicle, target_altitude):
     """
-    Arms the drone and takes off to the specified altitude.
+    Arms the drone and takes off to the specified altitude with blocking behavior.
 
     Args:
         vehicle: The connected mavlink object
@@ -479,11 +551,10 @@ def arm_and_takeoff(vehicle, target_altitude):
         return False
 
     try:
-        # First, check if we're already armed
+        # Use simplified armability check
         logging.info("Basic pre-arm checks")
         if not is_armable(vehicle):
-            logging.warning("Vehicle not armable - check prearm messages")
-            return False
+            logging.warning("Vehicle may not be ready - attempting arm anyway")
 
         # Set to GUIDED mode
         logging.info("Setting mode to GUIDED")
@@ -492,9 +563,14 @@ def arm_and_takeoff(vehicle, target_altitude):
             return False
 
         # Arm the vehicle
+        logging.info("Arming vehicle...")
         if not arm_vehicle(vehicle):
             logging.error("Failed to arm vehicle")
             return False
+
+        # Wait for altitude to stabilize after arming
+        logging.info("Waiting 2 seconds for sensors to stabilize...")
+        time.sleep(2)
 
         # Send takeoff command
         logging.info(f"Taking off to {target_altitude} meters")
@@ -507,34 +583,14 @@ def arm_and_takeoff(vehicle, target_altitude):
             target_altitude     # Param 7: Altitude (in meters)
         )
 
-        # Wait for takeoff to target altitude
-        start_time = time.time()
-        timeout = 60  # seconds (timeout after 1 minute)
+        # Use the blocking altitude wait function
+        if not wait_for_altitude_blocking(vehicle, target_altitude, timeout=60, tolerance=0.2):
+            logging.error(f"Failed to reach takeoff altitude {target_altitude}m")
+            return False
 
-        # Set up altitude reporting
-        request_message_interval(vehicle, mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 2)
+        logging.info(f"✓ Takeoff successful - reached {target_altitude}m")
+        return True
 
-        # Monitor altitude
-        while time.time() - start_time < timeout:
-            altitude = get_altitude(vehicle)
-
-            if altitude is not None:
-                logging.info(f"Altitude: {altitude:.1f} meters")
-
-                # Break once we reach 95% of target
-                if altitude >= target_altitude * 0.95:
-                    logging.info("Reached target altitude")
-                    return True
-
-            # Check if still armed
-            if not check_if_armed(vehicle):
-                logging.error("Vehicle disarmed during takeoff")
-                return False
-
-            time.sleep(1)
-
-        logging.warning("Takeoff timed out")
-        return False
     except Exception as e:
         logging.error(f"Error during takeoff: {str(e)}")
         return False

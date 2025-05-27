@@ -12,7 +12,7 @@ from pymavlink import mavutil
 from drone.connection import get_vehicle_state, print_vehicle_state, request_message_interval
 from drone.navigation import (
     arm_vehicle, disarm_vehicle, set_mode, arm_and_takeoff,
-    return_to_launch, check_if_armed, test_motors, get_altitude, get_location
+    return_to_launch, check_if_armed, test_motors, get_altitude, get_location, wait_for_altitude_blocking
 )
 from detection.camera import test_camera_feed
 from detection.models import load_detection_model, test_detection_model
@@ -624,102 +624,6 @@ def command_altitude_precise(vehicle, target_altitude):
     except Exception as e:
         logging.error(f"Error sending altitude command: {str(e)}")
         return False
-
-def wait_for_altitude_blocking(vehicle, target_altitude, timeout=30, tolerance=0.1):
-    """
-    Blocking wait for altitude with real-time feedback and audio notification.
-
-    Args:
-        vehicle: The connected mavlink object
-        target_altitude: Target altitude in meters
-        timeout: Maximum time to wait in seconds
-        tolerance: Altitude tolerance in meters
-
-    Returns:
-        True if altitude reached, False if timeout
-    """
-    if not vehicle:
-        logging.error("No vehicle connection")
-        return False
-
-    try:
-        logging.info(f"Waiting for altitude {target_altitude}m (tolerance: ±{tolerance}m)")
-
-        # Request high-frequency altitude updates
-        vehicle.mav.request_data_stream_send(
-            vehicle.target_system,
-            vehicle.target_component,
-            mavutil.mavlink.MAV_DATA_STREAM_POSITION,
-            20,  # 20 Hz
-            1    # Start
-        )
-
-        start_time = time.time()
-        last_altitude = None
-        stable_count = 0
-        required_stable_readings = 3  # Need 3 consecutive readings within tolerance
-
-        print(f"\nWaiting for altitude {target_altitude}m...")
-        print("-" * 50)
-
-        while time.time() - start_time < timeout:
-            # Get the most recent altitude reading
-            current_altitude = None
-
-            # Process recent messages to get latest altitude
-            for _ in range(10):  # Check up to 10 recent messages
-                msg = vehicle.recv_match(blocking=False)
-                if msg and msg.get_type() == "GLOBAL_POSITION_INT":
-                    current_altitude = msg.relative_alt / 1000.0
-
-            if current_altitude is not None:
-                # Calculate how close we are to target
-                altitude_diff = abs(current_altitude - target_altitude)
-                progress_percent = min(100, (current_altitude / target_altitude) * 100) if target_altitude > 0 else 0
-
-                # Check if within tolerance
-                if altitude_diff <= tolerance:
-                    stable_count += 1
-                    status = f"STABLE ({stable_count}/{required_stable_readings})"
-                else:
-                    stable_count = 0
-                    if current_altitude < target_altitude:
-                        status = "CLIMBING"
-                    else:
-                        status = "DESCENDING"
-
-                # Real-time display
-                timestamp = time.strftime("%H:%M:%S")
-                print(f"\r{timestamp} | Alt: {current_altitude:6.3f}m | Target: {target_altitude:6.3f}m | Diff: {altitude_diff:+6.3f}m | {progress_percent:5.1f}% | {status}", end="", flush=True)
-
-                # Check if we've reached target altitude with stability
-                if stable_count >= required_stable_readings:
-                    print(f"\n✓ REACHED {target_altitude}m! (Final: {current_altitude:.3f}m)")
-                    # play_beep()
-                    return True
-
-                last_altitude = current_altitude
-
-            # Safety check - ensure still armed
-            heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=False)
-            if heartbeat:
-                armed = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-                if not armed:
-                    print(f"\n✗ Vehicle disarmed during altitude wait!")
-                    return False
-
-            time.sleep(0.05)  # 50ms update rate
-
-
-        print(f"\n✗ Timeout waiting for altitude {target_altitude}m (current: {f'{last_altitude:.3f}m' if last_altitude else 'unknown'})")
-        return False
-
-    except Exception as e:
-        logging.error(f"Error waiting for altitude: {str(e)}")
-        return False
-#
-
-
 
 
 def monitor_altitude_realtime(vehicle, duration=0, update_interval=0.2):

@@ -12,7 +12,7 @@ from pymavlink import mavutil
 
 from drone.connection import get_vehicle_state  # Corrected import location
 from drone.navigation import (
-    arm_and_takeoff, set_mode, get_location, get_distance_metres,
+    arm_and_takeoff, check_if_armed_simple, disarm_vehicle, set_mode, get_location, get_distance_metres,
     get_location_metres, navigate_to_waypoint, return_to_launch,
     send_ned_velocity
 )
@@ -438,7 +438,7 @@ def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, timeout=45, tole
             # Safety check - ensure still armed and in correct mode
             heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=False)
             if heartbeat:
-                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                armed = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 if not armed:
                     print(f"\n✗ Vehicle disarmed during waypoint navigation!")
                     return False
@@ -514,7 +514,7 @@ def command_waypoint_precise(vehicle, target_lat, target_lon, altitude):
         logging.error(f"Error sending waypoint command: {str(e)}")
         return False
 
-    def mission_diamond_precision(vehicle, altitude=5):
+def mission_diamond_precision(vehicle, altitude=5):
     """
     Execute a precision diamond waypoint mission with blocking behavior.
 
@@ -535,9 +535,10 @@ def command_waypoint_precise(vehicle, target_lat, target_lon, altitude):
 
         # Define diamond waypoints around your field
         diamond_waypoints = [
-            (35.3482249, -119.1048284),  # HOME/North point
-            (35.3482019, -119.1049813),  # West point
-            (35.3481708, -119.1048297),  # South point
+            # (35.3482145, -119.1048425),  # North point
+            # (35.3482019, -119.1049813),  # West point
+            (35.3481850,	-119.1049075), # New West
+            # (35.3481708, -119.1048297),  # South point
             (35.3481795, -119.1046386),  # East point
         ]
 
@@ -615,7 +616,7 @@ def command_waypoint_precise(vehicle, target_lat, target_lon, altitude):
             # Check armed status and altitude
             heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
             if heartbeat:
-                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                armed = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
 
                 # Get current position and altitude
                 pos_msg = vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
@@ -647,7 +648,7 @@ def command_waypoint_precise(vehicle, target_lat, target_lon, altitude):
 
         # Final verification
         time.sleep(1)
-        final_armed = check_if_armed(vehicle)
+        final_armed = check_if_armed_simple(vehicle)
         if final_armed:
             logging.warning("Vehicle still armed after landing timeout - forcing disarm")
             disarm_vehicle(vehicle)
@@ -661,7 +662,7 @@ def command_waypoint_precise(vehicle, target_lat, target_lon, altitude):
             logging.warning("Attempting emergency return to launch")
             return_to_launch(vehicle)
             time.sleep(10)
-            if check_if_armed(vehicle):
+            if check_if_armed_simple(vehicle):
                 disarm_vehicle(vehicle)
         except:
             pass

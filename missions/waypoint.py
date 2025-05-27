@@ -363,14 +363,15 @@ def follow_mission_file(vehicle, mission_file):
         return False
 
 
-def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, timeout=45, tolerance=1.0):
+def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, target_altitude, timeout=45, tolerance=1.0):
     """
-    Blocking wait for waypoint arrival with real-time feedback.
+    Blocking wait for waypoint arrival with real-time feedback and altitude monitoring.
 
     Args:
         vehicle: The connected mavlink object
         target_lat: Target latitude
         target_lon: Target longitude
+        target_altitude: Target altitude to maintain
         timeout: Maximum time to wait in seconds
         tolerance: Distance tolerance in meters
 
@@ -398,10 +399,11 @@ def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, timeout=45, tole
         stable_count = 0
         required_stable_readings = 3
         target_location = (target_lat, target_lon, 0)
+        last_altitude_correction = 0
 
         print(f"\nNavigating to waypoint...")
-        print("Target: {:.7f}, {:.7f}".format(target_lat, target_lon))
-        print("-" * 60)
+        print("Target: {:.7f}, {:.7f} at {:.1f}m".format(target_lat, target_lon, target_altitude))
+        print("-" * 70)
 
         while time.time() - start_time < timeout:
             # Get current position
@@ -416,6 +418,25 @@ def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, timeout=45, tole
                 # Calculate bearing for reference
                 bearing = calculate_bearing(current_lat, current_lon, target_lat, target_lon)
 
+                # Monitor altitude loss and correct if needed
+                altitude_loss = target_altitude - current_alt
+                if altitude_loss > 0.5 and time.time() - last_altitude_correction > 2:
+                    logging.warning(f"Altitude loss detected: {altitude_loss:.2f}m, correcting...")
+
+                    # Send altitude correction command
+                    vehicle.mav.set_position_target_global_int_send(
+                        0,  # time_boot_ms
+                        vehicle.target_system,
+                        vehicle.target_component,
+                        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                        0b0000111111111000,  # type_mask (only alt enabled)
+                        int(current_lat * 1e7),
+                        int(current_lon * 1e7),
+                        target_altitude,
+                        0, 0, 0, 0, 0, 0, 0, 0
+                    )
+                    last_altitude_correction = time.time()
+
                 # Check if within tolerance
                 if distance <= tolerance:
                     stable_count += 1
@@ -424,13 +445,17 @@ def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, timeout=45, tole
                     stable_count = 0
                     status = f"MOVING (bearing: {bearing:.0f}°)"
 
-                # Real-time display
+                # Real-time display with altitude
                 timestamp = time.strftime("%H:%M:%S")
-                print(f"\r{timestamp} | Pos: {current_lat:.7f}, {current_lon:.7f} | Dist: {distance:6.2f}m | {status}", end="", flush=True)
+                alt_status = f"ALT: {current_alt:.2f}m"
+                if altitude_loss > 0.3:
+                    alt_status += f" (-{altitude_loss:.2f}m)"
+
+                print(f"\r{timestamp} | Pos: {current_lat:.7f}, {current_lon:.7f} | {alt_status} | Dist: {distance:6.2f}m | {status}", end="", flush=True)
 
                 # Check if we've reached waypoint with stability
                 if stable_count >= required_stable_readings:
-                    print(f"\n✓ WAYPOINT REACHED! (Final distance: {distance:.2f}m)")
+                    print(f"\n✓ WAYPOINT REACHED! (Final distance: {distance:.2f}m, altitude: {current_alt:.2f}m)")
                     return True
 
                 last_distance = distance
@@ -438,7 +463,7 @@ def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, timeout=45, tole
             # Safety check - ensure still armed and in correct mode
             heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=False)
             if heartbeat:
-                armed = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
                 if not armed:
                     print(f"\n✗ Vehicle disarmed during waypoint navigation!")
                     return False
@@ -538,6 +563,8 @@ def mission_diamond_precision(vehicle, altitude=5):
             # (35.3482145, -119.1048425),  # North point
             # (35.3482019, -119.1049813),  # West point
             (35.3481850,	-119.1049075), # New West
+            #(35.3481795,	-119.1046447),
+            #(35.3481817,	-119.1047332),
             # (35.3481708, -119.1048297),  # South point
             (35.3481795, -119.1046386),  # East point
         ]
@@ -580,7 +607,7 @@ def mission_diamond_precision(vehicle, altitude=5):
                 return False
 
             # BLOCKING wait for waypoint arrival
-            if not wait_for_waypoint_blocking(vehicle, waypoint_lat, waypoint_lon, timeout=60, tolerance=1.5):
+            if not wait_for_waypoint_blocking(vehicle, waypoint_lat, waypoint_lon, altitude, timeout=60, tolerance=1.5):
                 logging.error(f"Failed to reach waypoint {i}")
                 return_to_launch(vehicle)
                 return False

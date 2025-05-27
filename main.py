@@ -84,6 +84,15 @@ def main():
 
             "check-altitude",           # Real-time altitude monitoring
 
+            # short-cuts
+            "conn", "c", "1", # test-connection
+            "pre", "p", "0",  # preflight all
+            "reset", "r", "2",
+            "t-t", # test-takeoff (incremental)
+            "t-w", # test waypoint (diamond)
+
+
+
         ],
         help="Mission to execute"
     )
@@ -136,7 +145,7 @@ def main():
                 return 1
 
         # Execute the selected mission
-        if args.mission == "test-connection":
+        if args.mission == "test-connection" or args.mission in ["conn", "c", "1"]:
             success = test_connection(vehicle)
         elif args.mission == "test-arm":
             success = test_arm(vehicle)
@@ -177,7 +186,7 @@ def main():
             else:
                 success = False
                 logging.error("Failed to get diagnostics")
-        elif args.mission == "reset-controller":
+        elif args.mission == "reset-controller"  or args.mission in ["reset", "r", "2"]:
             from drone.connection import reset_flight_controller
             success = reset_flight_controller(vehicle)
             if success:
@@ -201,7 +210,7 @@ def main():
             else:
                 logging.warning("Orientation may be unstable - use caution")
 
-        elif args.mission == "incremental-takeoff":
+        elif args.mission == "incremental-takeoff" or args.mission in ["t-t"]:
             from missions.test_missions import test_incremental_takeoff
             success = test_incremental_takeoff(vehicle, args.altitude, args.increment)
 
@@ -215,7 +224,7 @@ def main():
                 logging.info("Altitude monitoring completed")
             else:
                 logging.error("Altitude monitoring failed")
-        elif args.mission == "preflight-all":
+        elif args.mission == "preflight-all"  or args.mission in ["pre", "p", "0"]:
             success = test_connection(vehicle)
             time.sleep(2)
             success = test_arm(vehicle)
@@ -231,7 +240,7 @@ def main():
             from drone.navigation import verify_position_hold
             success = verify_position_hold(vehicle)
 
-        elif args.mission == "diamond-waypoints":
+        elif args.mission == "diamond-waypoints" or args.mission in ["t-w"]:
             from missions.waypoint import mission_diamond_precision
             success = mission_diamond_precision(vehicle, args.altitude)
             if success:

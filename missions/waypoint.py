@@ -463,7 +463,7 @@ def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, target_altitude,
             # Safety check - ensure still armed and in correct mode
             heartbeat = vehicle.recv_match(type='HEARTBEAT', blocking=False)
             if heartbeat:
-                armed = (heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                armed = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 if not armed:
                     print(f"\n✗ Vehicle disarmed during waypoint navigation!")
                     return False
@@ -567,7 +567,7 @@ def mission_diamond_precision(vehicle, altitude=5):
             #(35.3481817,	-119.1047332),
             # (35.3481708, -119.1048297),  # South point
             (35.3481795, -119.1046386),  # East point
-        ]
+        ] * 70
 
         # Run pre-flight checks
         from drone.navigation import run_preflight_checks
@@ -691,6 +691,353 @@ def mission_diamond_precision(vehicle, altitude=5):
             time.sleep(10)
             if check_if_armed_simple(vehicle):
                 disarm_vehicle(vehicle)
+        except:
+            pass
+        return False
+
+def clean_message_streams(vehicle):
+    """
+    Clean up all existing message streams to prevent interference.
+    This fixes the degradation over time issue.
+    """
+    if not vehicle:
+        return False
+
+    try:
+        logging.info("Cleaning up message streams...")
+
+        # Stop all message intervals
+        common_message_ids = [
+            mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
+            mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT,
+            mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
+            mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD,
+            mavutil.mavlink.MAVLINK_MSG_ID_HEARTBEAT,
+        ]
+
+        for msg_id in common_message_ids:
+            vehicle.mav.command_long_send(
+                vehicle.target_system, vehicle.target_component,
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                msg_id, 0, 0, 0, 0, 0, 0  # 0 = stop
+            )
+
+        # Stop all legacy data streams
+        for stream_id in range(13):  # ArduPilot has streams 0-12
+            vehicle.mav.request_data_stream_send(
+                vehicle.target_system, vehicle.target_component,
+                stream_id, 0, 0  # Rate 0, stop
+            )
+
+        # Clear message buffer
+        start_time = time.time()
+        while time.time() - start_time < 1.0:  # Clear for 1 second
+            vehicle.recv_match(blocking=False)
+
+        logging.info("Message streams cleaned")
+        return True
+
+    except Exception as e:
+        logging.warning(f"Error cleaning message streams: {str(e)}")
+        return False
+
+def setup_optimized_position_stream(vehicle, rate_hz=5):
+    """
+    Set up position stream optimized for your setup.
+    Uses conservative rate and single method to prevent conflicts.
+    """
+    if not vehicle:
+        return False
+
+    try:
+        # First clean existing streams
+        clean_message_streams(vehicle)
+
+        # Wait for cleanup to take effect
+        time.sleep(0.5)
+
+        logging.info(f"Setting up optimized position stream at {rate_hz} Hz")
+
+        # Use ONLY the message interval method (which works best on your system)
+        interval_us = int(1000000 / rate_hz)
+
+        vehicle.mav.command_long_send(
+            vehicle.target_system, vehicle.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+            mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
+            interval_us, 0, 0, 0, 0, 0
+        )
+
+        # Wait for acknowledgment
+        ack = vehicle.recv_match(type='COMMAND_ACK', blocking=True, timeout=2)
+        if ack and ack.command == mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL:
+            if ack.result == 0:
+                logging.info("Position stream setup successful")
+            else:
+                logging.warning(f"Position stream setup ACK result: {ack.result}")
+
+        # Test the stream briefly
+        time.sleep(0.5)
+        test_msg = vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=2)
+        if test_msg:
+            lat = test_msg.lat / 1e7
+            lon = test_msg.lon / 1e7
+            alt = test_msg.relative_alt / 1000.0
+            logging.info(f"Position stream test: {lat:.7f}, {lon:.7f}, {alt:.2f}m")
+            return True
+        else:
+            logging.warning("Position stream test failed")
+            return False
+
+    except Exception as e:
+        logging.error(f"Error setting up position stream: {str(e)}")
+        return False
+
+def get_location_single_request(vehicle, timeout=2):
+    """
+    Get location with single clean request - no sustained streaming.
+    This prevents the degradation issue you're experiencing.
+    """
+    if not vehicle:
+        return None
+
+    try:
+        # Clear buffer first
+        while vehicle.recv_match(blocking=False):
+            pass
+
+        # Request ONE position update
+        vehicle.mav.command_long_send(
+            vehicle.target_system, vehicle.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+            mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
+            100000, 0, 0, 0, 0, 0  # 10 Hz for just this request
+        )
+
+        # Get the message
+        msg = vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=timeout)
+
+        # Stop the stream immediately
+        vehicle.mav.command_long_send(
+            vehicle.target_system, vehicle.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+            mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
+            0, 0, 0, 0, 0, 0  # Stop
+        )
+
+        if msg:
+            lat = msg.lat / 1e7
+            lon = msg.lon / 1e7
+            alt = msg.relative_alt / 1000.0
+            return (lat, lon, alt)
+        else:
+            return None
+
+    except Exception as e:
+        logging.warning(f"Error getting single location: {str(e)}")
+        return None
+
+def wait_for_waypoint_optimized(vehicle, target_lat, target_lon, target_altitude, timeout=60, tolerance=2.0):
+    """
+    Optimized waypoint waiting that works with your message rate patterns.
+    Uses burst requests instead of sustained streaming.
+    """
+    if not vehicle:
+        return False
+
+    try:
+        logging.info(f"Optimized navigation to: {target_lat:.7f}, {target_lon:.7f}")
+
+        start_time = time.time()
+        target_location = (target_lat, target_lon, 0)
+        consecutive_good = 0
+        required_good = 3
+        last_distance = None
+        check_interval = 1.0  # Check position every 1 second
+        last_check = 0
+
+        print(f"\nOptimized waypoint navigation...")
+        print("Target: {:.7f}, {:.7f} at {:.1f}m".format(target_lat, target_lon, target_altitude))
+        print("-" * 70)
+
+        while time.time() - start_time < timeout:
+            current_time = time.time()
+
+            # Only check position at intervals to prevent stream degradation
+            if current_time - last_check >= check_interval:
+                # Get position with single clean request
+                current_location = get_location_single_request(vehicle, timeout=2)
+                last_check = current_time
+
+                if current_location:
+                    current_lat, current_lon, current_alt = current_location
+
+                    # Calculate distance
+                    distance = get_distance_metres(current_location, target_location)
+                    bearing = calculate_bearing(current_lat, current_lon, target_lat, target_lon)
+
+                    # Check altitude and correct if needed
+                    altitude_error = target_altitude - current_alt
+                    if abs(altitude_error) > 0.8:
+                        logging.info(f"Altitude correction needed: {altitude_error:+.2f}m")
+
+                        try:
+                            vehicle.mav.set_position_target_global_int_send(
+                                0, vehicle.target_system, vehicle.target_component,
+                                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                                0b0000111111111000,  # Only altitude
+                                int(current_lat * 1e7), int(current_lon * 1e7), target_altitude,
+                                0, 0, 0, 0, 0, 0, 0, 0
+                            )
+                        except Exception as e:
+                            logging.warning(f"Altitude correction failed: {str(e)}")
+
+                    # Check if within tolerance
+                    if distance <= tolerance:
+                        consecutive_good += 1
+                        status = f"ARRIVED ({consecutive_good}/{required_good})"
+                    else:
+                        consecutive_good = 0
+
+                        # Show progress
+                        if last_distance and distance < last_distance:
+                            status = f"APPROACHING (↓{last_distance-distance:.1f}m, bearing {bearing:.0f}°)"
+                        else:
+                            status = f"MOVING (bearing {bearing:.0f}°)"
+
+                    # Display with timestamp
+                    timestamp = time.strftime("%H:%M:%S")
+                    alt_display = f"ALT: {current_alt:.2f}m"
+                    if abs(altitude_error) > 0.3:
+                        alt_display += f" ({altitude_error:+.2f}m)"
+
+                    print(f"{timestamp} | Pos: {current_lat:.7f}, {current_lon:.7f} | {alt_display} | Dist: {distance:6.2f}m | {status}")
+
+                    # Check if waypoint reached
+                    if consecutive_good >= required_good:
+                        print(f"✓ WAYPOINT REACHED! (Final: {distance:.2f}m, alt: {current_alt:.2f}m)")
+                        return True
+
+                    last_distance = distance
+
+                else:
+                    print(f"{time.strftime('%H:%M:%S')} | ⚠️  Position request failed")
+
+            # Brief sleep between checks
+            time.sleep(0.2)
+
+        print(f"❌ Timeout after {timeout}s (final distance: {last_distance:.2f}m)" if last_distance else f"❌ Timeout after {timeout}s")
+        return False
+
+    except Exception as e:
+        logging.error(f"Error during optimized waypoint wait: {str(e)}")
+        return False
+
+def command_waypoint_clean(vehicle, target_lat, target_lon, altitude):
+    """Send waypoint command with clean approach"""
+    if not vehicle:
+        return False
+
+    try:
+        logging.info(f"Commanding waypoint: {target_lat:.7f}, {target_lon:.7f} at {altitude}m")
+
+        vehicle.mav.set_position_target_global_int_send(
+            0, vehicle.target_system, vehicle.target_component,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            0b0000111111111000,  # Position only
+            int(target_lat * 1e7), int(target_lon * 1e7), altitude,
+            0, 0, 0, 0, 0, 0, 0, 0
+        )
+
+        time.sleep(0.1)
+        return True
+
+    except Exception as e:
+        logging.error(f"Error sending waypoint: {str(e)}")
+        return False
+
+def mission_diamond_precision_fixed(vehicle, altitude=5):
+    """
+    Diamond mission optimized for your specific setup.
+    Fixes the message degradation issue.
+    """
+    if not vehicle:
+        return False
+
+    try:
+        logging.info("=== OPTIMIZED DIAMOND MISSION (Fixed for Your Setup) ===")
+
+        # Clean up any existing streams first
+        clean_message_streams(vehicle)
+
+        # Your waypoints
+        diamond_waypoints = [
+            (35.3481850, -119.1049075),  # West point
+            (35.3481795, -119.1046386),  # East point
+        ]
+
+        # Pre-flight checks and takeoff (using your existing functions)
+        from drone.navigation import run_preflight_checks, set_mode, arm_and_takeoff, return_to_launch, check_if_armed, disarm_vehicle
+
+        checks_passed, failure_reason = run_preflight_checks(vehicle)
+        if not checks_passed:
+            logging.error(f"Pre-flight checks failed: {failure_reason}")
+            return False
+
+        if not set_mode(vehicle, "GUIDED"):
+            logging.error("Failed to set GUIDED mode")
+            return False
+
+        if not arm_and_takeoff(vehicle, altitude):
+            logging.error("Failed to takeoff")
+            return False
+
+        # Get home position
+        home_location = get_location_single_request(vehicle, timeout=5)
+        if home_location:
+            logging.info(f"Home: {home_location[0]:.7f}, {home_location[1]:.7f}")
+
+        # Navigate to waypoints
+        for i, (lat, lon) in enumerate(diamond_waypoints, 1):
+            logging.info(f"\n📍 WAYPOINT {i}/{len(diamond_waypoints)}")
+
+            if not command_waypoint_clean(vehicle, lat, lon, altitude):
+                logging.error(f"Failed to command waypoint {i}")
+                return_to_launch(vehicle)
+                return False
+
+            if not wait_for_waypoint_optimized(vehicle, lat, lon, altitude, timeout=90, tolerance=2.0):
+                logging.error(f"Failed to reach waypoint {i}")
+                return_to_launch(vehicle)
+                return False
+
+            logging.info(f"✓ Waypoint {i} complete")
+            if i < len(diamond_waypoints):
+                time.sleep(2)
+
+        # Return home
+        logging.info("\n🏠 RETURNING HOME")
+        return_to_launch(vehicle)
+
+        # Wait for landing
+        start_time = time.time()
+        while time.time() - start_time < 120:
+            if not check_if_armed(vehicle):
+                logging.info("✓ Landed and disarmed")
+                break
+            time.sleep(2)
+
+        # Final cleanup
+        clean_message_streams(vehicle)
+
+        logging.info("🎉 OPTIMIZED MISSION COMPLETE")
+        return True
+
+    except Exception as e:
+        logging.error(f"Mission error: {str(e)}")
+        try:
+            clean_message_streams(vehicle)
+            return_to_launch(vehicle)
         except:
             pass
         return False

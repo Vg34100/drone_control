@@ -10,6 +10,7 @@ import argparse
 import sys
 import logging
 import time
+from drone.servo import test_servo_simple
 from pymavlink import mavutil
 
 # Import modules
@@ -24,6 +25,7 @@ from missions.test_missions import (
     test_motor
 )
 from missions.waypoint import (
+    mission_diamond_precision_fixed,
     mission_waypoint,
     mission_waypoint_detect
 )
@@ -59,6 +61,7 @@ def main():
             "test-motor",           # Test each motor functionality
             "test-camera",          # Test camera functionality
             "test-detect",
+            "test-servo",
 
             # Test takeoff scripts
             "test-takeoff",
@@ -242,12 +245,13 @@ def main():
 
         elif args.mission == "diamond-waypoints" or args.mission in ["t-w"]:
             from missions.waypoint import mission_diamond_precision
-            success = mission_diamond_precision(vehicle, args.altitude)
+            success = mission_diamond_precision_fixed(vehicle, args.altitude)
             if success:
                 logging.info("Diamond waypoint mission completed successfully")
             else:
                 logging.error("Diamond waypoint mission failed")
-
+        elif args.mission == "test-servo":
+            success = test_servo_simple(vehicle)
 
 
         if success:

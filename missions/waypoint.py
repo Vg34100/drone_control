@@ -956,7 +956,7 @@ def command_waypoint_clean(vehicle, target_lat, target_lon, altitude):
         logging.error(f"Error sending waypoint: {str(e)}")
         return False
 
-def mission_diamond_precision_fixed(vehicle, altitude=5):
+def mission_diamond_precision_fixed(vehicle, altitude=5, loops=1):
     """
     Diamond mission optimized for your specific setup.
     Fixes the message degradation issue.
@@ -972,9 +972,12 @@ def mission_diamond_precision_fixed(vehicle, altitude=5):
 
         # Your waypoints
         diamond_waypoints = [
-            (35.3481850, -119.1049075),  # West point
-            (35.3481795, -119.1046386),  # East point
-        ]
+            # (35.3481850, -119.1049075),  # West point
+            # (35.3481795, -119.1046386),  # East point
+            # Closer Positions
+            (35.3481866,	-119.1047372), #left
+            (35.3481888,	-119.1048713), #right
+        ] * loops
 
         # Pre-flight checks and takeoff (using your existing functions)
         from drone.navigation import run_preflight_checks, set_mode, arm_and_takeoff, return_to_launch, check_if_armed, disarm_vehicle

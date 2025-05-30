@@ -120,6 +120,12 @@ def main():
         help="Path to the detection model"
     )
     parser.add_argument(
+        "--duration",
+        type=float,
+        default=1.0,
+        help="Duration for motor testing (0-100)"
+    )
+    parser.add_argument(
         "--throttle",
         type=float,
         default=15.0,
@@ -130,6 +136,12 @@ def main():
     type=float,
     default=1.0,
     help="Height increment in meters for incremental takeoff test"
+    )
+    parser.add_argument(
+    "--loops",
+    type=int,
+    default=1,
+    help="How many times to repeat the mission"
     )
 
     args = parser.parse_args()
@@ -159,7 +171,7 @@ def main():
         elif args.mission == "test-detect":
             success = test_detection(args.model)
         elif args.mission == "test-motor":
-            success = test_motor(vehicle, args.throttle)
+            success = test_motor(vehicle, args.throttle, args.duration)
         elif args.mission == "waypoint":
             success = mission_waypoint(vehicle, args.altitude)
         elif args.mission == "waypoint-detect":
@@ -245,7 +257,7 @@ def main():
 
         elif args.mission == "diamond-waypoints" or args.mission in ["t-w"]:
             from missions.waypoint import mission_diamond_precision
-            success = mission_diamond_precision_fixed(vehicle, args.altitude)
+            success = mission_diamond_precision_fixed(vehicle, args.altitude, args.loops)
             if success:
                 logging.info("Diamond waypoint mission completed successfully")
             else:

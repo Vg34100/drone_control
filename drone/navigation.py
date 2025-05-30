@@ -1138,10 +1138,10 @@ def check_if_armed_simple(vehicle):
         return False
 
 
-# --- drone/navigation.py ---
+# drone/navigation.py - FIXED FUNCTION
 def run_preflight_checks(vehicle, min_gps_fix=3, min_battery=50, check_compass=True):
     """
-    Run comprehensive pre-flight safety checks.
+    Run comprehensive pre-flight safety checks with proper error handling.
 
     Args:
         vehicle: The connected mavlink object
@@ -1173,6 +1173,8 @@ def run_preflight_checks(vehicle, min_gps_fix=3, min_battery=50, check_compass=T
 
         start_time = time.time()
         gps_check_passed = False
+        fix_type = 0  # Initialize with default value
+        satellites = 0  # Initialize with default value
 
         while time.time() - start_time < 3:
             msg = vehicle.recv_match(type='GPS_RAW_INT', blocking=False)
@@ -1180,11 +1182,15 @@ def run_preflight_checks(vehicle, min_gps_fix=3, min_battery=50, check_compass=T
                 fix_type = msg.fix_type
                 satellites = msg.satellites_visible
 
+                # Define fix type names
                 fix_type_name = "No GPS" if fix_type == 0 else \
                                "No Fix" if fix_type == 1 else \
                                "2D Fix" if fix_type == 2 else \
                                "3D Fix" if fix_type == 3 else \
-                               f"Unknown Fix ({fix_type})"
+                               "3D DGPS" if fix_type == 4 else \
+                               "RTK Float" if fix_type == 5 else \
+                               "RTK Fixed" if fix_type == 6 else \
+                               f"Fix Type {fix_type}"
 
                 logging.info(f"GPS: {fix_type_name} with {satellites} satellites")
 
@@ -1194,8 +1200,21 @@ def run_preflight_checks(vehicle, min_gps_fix=3, min_battery=50, check_compass=T
 
             time.sleep(0.2)
 
+        # Handle case where no GPS message was received
         if not gps_check_passed:
-            failures.append(f"GPS fix type below minimum required (current: {fix_type_name}, required: 3D fix)")
+            if fix_type == 0:
+                fix_type_name = "No GPS data received"
+            else:
+                fix_type_name = "No GPS" if fix_type == 0 else \
+                               "No Fix" if fix_type == 1 else \
+                               "2D Fix" if fix_type == 2 else \
+                               "3D Fix" if fix_type == 3 else \
+                               "3D DGPS" if fix_type == 4 else \
+                               "RTK Float" if fix_type == 5 else \
+                               "RTK Fixed" if fix_type == 6 else \
+                               f"Fix Type {fix_type}"
+
+            failures.append(f"GPS fix type below minimum required (current: {fix_type_name}, required: 3D fix or better)")
 
         # Check 3: Battery level
         logging.info("Check 3: Verifying battery level...")
@@ -1205,6 +1224,7 @@ def run_preflight_checks(vehicle, min_gps_fix=3, min_battery=50, check_compass=T
 
         start_time = time.time()
         battery_check_passed = False
+        battery_remaining = -1  # Initialize with default
 
         while time.time() - start_time < 2:
             msg = vehicle.recv_match(type='SYS_STATUS', blocking=False)
@@ -1225,7 +1245,7 @@ def run_preflight_checks(vehicle, min_gps_fix=3, min_battery=50, check_compass=T
 
             time.sleep(0.2)
 
-        if not battery_check_passed:
+        if not battery_check_passed and battery_remaining >= 0:
             failures.append(f"Battery level below minimum (current: {battery_remaining}%, required: {min_battery}%)")
 
         # Check 4: Pre-arm status

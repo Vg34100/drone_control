@@ -207,3 +207,54 @@ def set_servo_output_channel(vehicle, channel, output):
     except Exception as e:
         logging.error(f"Error setting servo output: {str(e)}")
         return False
+
+
+def test_servo_simple(vehicle, servo_number=9, duration=1):
+    """
+    Test servo with high/mid/low positions for specified duration each.
+
+    Args:
+        vehicle: The connected mavlink object
+        servo_number: The servo number to test (default: 9 for AUX OUT 1)
+        duration: Duration to hold each position in seconds
+
+    Returns:
+        True if test completed successfully, False otherwise
+    """
+    if not vehicle:
+        logging.error("No vehicle connection")
+        return False
+
+    try:
+        logging.info(f"Testing servo {servo_number} with high/mid/low positions")
+        logging.info(f"Duration: {duration} second(s) per position")
+
+        # Test positions (typical PWM values)
+        positions = [
+            ("HIGH", 2000),  # High position - rotates one way
+            ("MID", 1500),   # Mid position - neutral/no movement
+            ("LOW", 1000)    # Low position - rotates other way
+        ]
+
+        for position_name, pwm_value in positions:
+            logging.info(f"Setting servo {servo_number} to {position_name} position ({pwm_value} PWM)")
+
+            # Set servo position
+            if not set_servo_position(vehicle, servo_number, pwm_value):
+                logging.error(f"Failed to set servo to {position_name} position")
+                return False
+
+            # Hold position for specified duration
+            logging.info(f"Holding {position_name} position for {duration} second(s)")
+            time.sleep(duration)
+
+        # Return to neutral position
+        logging.info(f"Returning servo {servo_number} to MID position (neutral)")
+        set_servo_position(vehicle, servo_number, 1500)
+
+        logging.info("Servo test completed successfully")
+        return True
+
+    except Exception as e:
+        logging.error(f"Error during servo test: {str(e)}")
+        return False

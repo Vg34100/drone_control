@@ -10,6 +10,7 @@ import argparse
 import sys
 import logging
 import time
+from drone.servo import test_servo_simple
 from pymavlink import mavutil
 
 # Import modules
@@ -24,6 +25,7 @@ from missions.test_missions import (
     test_motor
 )
 from missions.waypoint import (
+    mission_diamond_precision_fixed,
     mission_waypoint,
     mission_waypoint_detect
 )
@@ -53,20 +55,47 @@ def main():
     parser.add_argument(
         "mission",
         choices=[
-            "test-connection",
-            "test-arm",
-            "test-takeoff",
-            "test-camera",
+            "test-connection",      # Test connection to the vehicle and runs diagnostics
+            "preflight-all",        # Run all preflight checks (connection, arm, motors, and preflight tests)
+            "test-arm",             # Test arming the vehicle
+            "test-motor",           # Test each motor functionality
+            "test-camera",          # Test camera functionality
             "test-detect",
-            "test-motor",
+            "test-servo",
+
+            # Test takeoff scripts
+            "test-takeoff",
+            "incremental-takeoff",      # New incremental takeoff test
+            "diamond-waypoints",
+
             "waypoint",
             "waypoint-detect",
             "package-delivery",
             "package-drop",
             "target-localize",
-            "fix-mode",
-            "diagnostics",         # New command
-            "reset-controller"     # New command
+
+            # Fixes
+            "fix-mode",             # Fix the mode after RTL if necessary
+
+            "diagnostics",          # New command
+            "reset-controller",     # Resets the flight controller
+
+            # Preflight
+            "safety-check",             # To run safety checks only
+            "orientation-check",        # To check orientation stability
+            "position-hold-check",      # To test position holding
+
+            "check-altitude",           # Real-time altitude monitoring
+
+            # short-cuts
+            "conn", "c", "1", # test-connection
+            "pre", "p", "0",  # preflight all
+            "reset", "r", "2",
+            "t-t", # test-takeoff (incremental)
+            "t-w", # test waypoint (diamond)
+
+
+
         ],
         help="Mission to execute"
     )
@@ -75,7 +104,7 @@ def main():
     parser.add_argument(
         "--altitude",
         type=float,
-        default=10.0,
+        default=3.0,
         help="Target altitude in meters"
     )
     parser.add_argument(
@@ -91,10 +120,28 @@ def main():
         help="Path to the detection model"
     )
     parser.add_argument(
+        "--duration",
+        type=float,
+        default=1.0,
+        help="Duration for motor testing (0-100)"
+    )
+    parser.add_argument(
         "--throttle",
         type=float,
         default=15.0,
         help="Throttle percentage for motor testing (0-100)"
+    )
+    parser.add_argument(
+    "--increment",
+    type=float,
+    default=1.0,
+    help="Height increment in meters for incremental takeoff test"
+    )
+    parser.add_argument(
+    "--loops",
+    type=int,
+    default=1,
+    help="How many times to repeat the mission"
     )
 
     args = parser.parse_args()
@@ -113,7 +160,7 @@ def main():
                 return 1
 
         # Execute the selected mission
-        if args.mission == "test-connection":
+        if args.mission == "test-connection" or args.mission in ["conn", "c", "1"]:
             success = test_connection(vehicle)
         elif args.mission == "test-arm":
             success = test_arm(vehicle)
@@ -124,7 +171,7 @@ def main():
         elif args.mission == "test-detect":
             success = test_detection(args.model)
         elif args.mission == "test-motor":
-            success = test_motor(vehicle, args.throttle)
+            success = test_motor(vehicle, args.throttle, args.duration)
         elif args.mission == "waypoint":
             success = mission_waypoint(vehicle, args.altitude)
         elif args.mission == "waypoint-detect":
@@ -154,13 +201,70 @@ def main():
             else:
                 success = False
                 logging.error("Failed to get diagnostics")
-        elif args.mission == "reset-controller":
+        elif args.mission == "reset-controller"  or args.mission in ["reset", "r", "2"]:
             from drone.connection import reset_flight_controller
             success = reset_flight_controller(vehicle)
             if success:
                 logging.info("Reset command sent to flight controller")
             else:
                 logging.error("Failed to send reset command")
+        elif args.mission == "safety-check":
+            from drone.navigation import run_preflight_checks
+            checks_passed, failure_reason = run_preflight_checks(vehicle)
+            success = checks_passed
+            if not success:
+                logging.error(f"Safety checks failed: {failure_reason}")
+            else:
+                logging.info("All safety checks passed!")
+
+        elif args.mission == "orientation-check":
+            from drone.navigation import verify_orientation
+            success = verify_orientation(vehicle)
+            if success:
+                logging.info("Orientation is stable and suitable for takeoff")
+            else:
+                logging.warning("Orientation may be unstable - use caution")
+
+        elif args.mission == "incremental-takeoff" or args.mission in ["t-t"]:
+            from missions.test_missions import test_incremental_takeoff
+            success = test_incremental_takeoff(vehicle, args.altitude, args.increment)
+
+        elif args.mission == "position-hold-check" :
+            from drone.navigation import verify_position_hold
+            success = verify_position_hold(vehicle)
+        elif args.mission == "check-altitude":
+            from missions.test_missions import monitor_altitude_realtime
+            success = monitor_altitude_realtime(vehicle, duration=0)  # 0 = indefinite
+            if success:
+                logging.info("Altitude monitoring completed")
+            else:
+                logging.error("Altitude monitoring failed")
+        elif args.mission == "preflight-all"  or args.mission in ["pre", "p", "0"]:
+            success = test_connection(vehicle)
+            time.sleep(2)
+            success = test_arm(vehicle)
+            time.sleep(2)
+            success = test_motor(vehicle, args.throttle)
+            time.sleep(2)
+            from drone.navigation import run_preflight_checks
+            checks_passed, failure_reason = run_preflight_checks(vehicle)
+            time.sleep(2)
+            from drone.navigation import verify_orientation
+            success = verify_orientation(vehicle)
+            time.sleep(2)
+            from drone.navigation import verify_position_hold
+            success = verify_position_hold(vehicle)
+
+        elif args.mission == "diamond-waypoints" or args.mission in ["t-w"]:
+            from missions.waypoint import mission_diamond_precision
+            success = mission_diamond_precision_fixed(vehicle, args.altitude, args.loops)
+            if success:
+                logging.info("Diamond waypoint mission completed successfully")
+            else:
+                logging.error("Diamond waypoint mission failed")
+        elif args.mission == "test-servo":
+            success = test_servo_simple(vehicle)
+
 
         if success:
             logging.info(f"Mission '{args.mission}' completed successfully")

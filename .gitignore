@@ -1,3 +1,6 @@
 */__pycache__/*
 docs/history/*
 .vscode
+venv
+*.patch
+*.log

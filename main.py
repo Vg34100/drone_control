@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+main.py - IMPROVED VERSION
 Drone Control System - Main Launcher
 -----------------------------------
 This script serves as the main entry point for all drone operations.
@@ -10,280 +11,396 @@ import argparse
 import sys
 import logging
 import time
-from drone.servo import test_servo_simple
+from typing import Dict, Callable, Any
 from pymavlink import mavutil
 
 # Import modules
 from drone.connection import connect_vehicle, close_vehicle
 from drone.navigation import set_mode, test_motors
+from drone.servo import test_servo_simple
 from missions.test_missions import (
-    test_connection,
-    test_arm,
-    test_takeoff,
-    test_camera,
-    test_detection,
-    test_motor
+    test_connection, test_arm, test_takeoff, test_camera, test_detection,
+    test_motor, test_incremental_takeoff, monitor_altitude_realtime
 )
 from missions.waypoint import (
-    mission_diamond_precision_fixed,
-    mission_waypoint,
-    mission_waypoint_detect
+    mission_diamond_precision_fixed, mission_waypoint, mission_waypoint_detect
 )
 from missions.delivery import (
-    mission_package_delivery,
-    mission_package_drop,
-    mission_target_localize
+    mission_package_delivery, mission_package_drop, mission_target_localize
 )
 
-def main():
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        filename='drone_mission.log'
-    )
-    console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    console.setFormatter(formatter)
-    logging.getLogger('').addHandler(console)
+class MissionConfig:
+    """Configuration class for mission parameters and shortcuts"""
 
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Drone Mission Control System")
+    # Mission aliases mapping - maps shortcuts to primary mission names
+    MISSION_ALIASES = {
+        # Connection tests
+        "test-connection": ["conn", "c", "1"],
+        "preflight-all": ["pre", "p", "0"],
+        "reset-controller": ["reset", "r", "2"],
 
-    # Mission selection argument
-    parser.add_argument(
-        "mission",
-        choices=[
-            "test-connection",      # Test connection to the vehicle and runs diagnostics
-            "preflight-all",        # Run all preflight checks (connection, arm, motors, and preflight tests)
-            "test-arm",             # Test arming the vehicle
-            "test-motor",           # Test each motor functionality
-            "test-camera",          # Test camera functionality
-            "test-detect",
-            "test-servo",
+        # Takeoff tests
+        "incremental-takeoff": ["t-t", "inc-takeoff"],
+        "diamond-waypoints": ["t-w", "diamond"],
 
-            # Test takeoff scripts
-            "test-takeoff",
-            "incremental-takeoff",      # New incremental takeoff test
-            "diamond-waypoints",
+        # Quick access shortcuts
+        "test-arm": ["arm", "a"],
+        "test-motor": ["motor", "m"],
+        "test-camera": ["cam", "camera"],
+        "test-servo": ["servo", "s"],
+        "test-takeoff": ["takeoff", "to"],
 
-            "waypoint",
-            "waypoint-detect",
-            "package-delivery",
-            "package-drop",
-            "target-localize",
+        # Advanced missions
+        "waypoint": ["wp", "way"],
+        "package-delivery": ["delivery", "del"],
+        "package-drop": ["drop", "pd"],
+        "target-localize": ["localize", "loc"],
 
-            # Fixes
-            "fix-mode",             # Fix the mode after RTL if necessary
+        # Diagnostics
+        "diagnostics": ["diag", "d"],
+        "check-altitude": ["alt", "altitude"],
+        "safety-check": ["safety", "safe"],
+        "orientation-check": ["orient", "orientation"],
+        "position-hold-check": ["pos-hold", "position"],
+    }
 
-            "diagnostics",          # New command
-            "reset-controller",     # Resets the flight controller
+    # Reverse mapping for quick lookup
+    ALIAS_TO_MISSION = {}
+    for mission, aliases in MISSION_ALIASES.items():
+        ALIAS_TO_MISSION[mission] = mission  # Add the primary name
+        for alias in aliases:
+            ALIAS_TO_MISSION[alias] = mission
 
-            # Preflight
-            "safety-check",             # To run safety checks only
-            "orientation-check",        # To check orientation stability
-            "position-hold-check",      # To test position holding
+class DroneController:
+    """Main drone controller class"""
 
-            "check-altitude",           # Real-time altitude monitoring
+    def __init__(self):
+        self.vehicle = None
+        self.config = MissionConfig()
+        self.mission_handlers = self._setup_mission_handlers()
 
-            # short-cuts
-            "conn", "c", "1", # test-connection
-            "pre", "p", "0",  # preflight all
-            "reset", "r", "2",
-            "t-t", # test-takeoff (incremental)
-            "t-w", # test waypoint (diamond)
+    def _setup_mission_handlers(self) -> Dict[str, Callable]:
+        """Setup mission handler mapping"""
+        return {
+            # Connection and diagnostics
+            "test-connection": self._handle_test_connection,
+            "preflight-all": self._handle_preflight_all,
+            "reset-controller": self._handle_reset_controller,
+            "diagnostics": self._handle_diagnostics,
 
+            # Basic tests
+            "test-arm": self._handle_test_arm,
+            "test-motor": self._handle_test_motor,
+            "test-camera": self._handle_test_camera,
+            "test-servo": self._handle_test_servo,
+            "test-detect": self._handle_test_detect,
 
+            # Takeoff tests
+            "test-takeoff": self._handle_test_takeoff,
+            "incremental-takeoff": self._handle_incremental_takeoff,
+            "diamond-waypoints": self._handle_diamond_waypoints,
 
-        ],
-        help="Mission to execute"
-    )
+            # Navigation missions
+            "waypoint": self._handle_waypoint,
+            "waypoint-detect": self._handle_waypoint_detect,
 
-    # Optional arguments
-    parser.add_argument(
-        "--altitude",
-        type=float,
-        default=3.0,
-        help="Target altitude in meters"
-    )
-    parser.add_argument(
-        "--connection",
-        type=str,
-        default="tcp:127.0.0.1:5761",
-        help="Connection string for the vehicle"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="models/latest.pt",
-        help="Path to the detection model"
-    )
-    parser.add_argument(
-        "--duration",
-        type=float,
-        default=1.0,
-        help="Duration for motor testing (0-100)"
-    )
-    parser.add_argument(
-        "--throttle",
-        type=float,
-        default=15.0,
-        help="Throttle percentage for motor testing (0-100)"
-    )
-    parser.add_argument(
-    "--increment",
-    type=float,
-    default=1.0,
-    help="Height increment in meters for incremental takeoff test"
-    )
-    parser.add_argument(
-    "--loops",
-    type=int,
-    default=1,
-    help="How many times to repeat the mission"
-    )
+            # Delivery missions
+            "package-delivery": self._handle_package_delivery,
+            "package-drop": self._handle_package_drop,
+            "target-localize": self._handle_target_localize,
 
-    args = parser.parse_args()
+            # System controls
+            "fix-mode": self._handle_fix_mode,
 
-    # Connect to vehicle for missions that require it
-    vehicle = None
-    mission_requires_vehicle = args.mission not in ["test-camera"]
+            # Safety checks
+            "safety-check": self._handle_safety_check,
+            "orientation-check": self._handle_orientation_check,
+            "position-hold-check": self._handle_position_hold_check,
+            "check-altitude": self._handle_check_altitude,
+        }
 
-    try:
-        # Initialize vehicle connection if needed
-        if mission_requires_vehicle:
-            logging.info(f"Connecting to vehicle at {args.connection}")
-            vehicle = connect_vehicle(args.connection)
-            if not vehicle:
-                logging.error("Failed to connect to vehicle")
-                return 1
+    def setup_logging(self):
+        """Configure logging"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            filename='drone_mission.log'
+        )
+        console = logging.StreamHandler()
+        console.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        console.setFormatter(formatter)
+        logging.getLogger('').addHandler(console)
 
-        # Execute the selected mission
-        if args.mission == "test-connection" or args.mission in ["conn", "c", "1"]:
-            success = test_connection(vehicle)
-        elif args.mission == "test-arm":
-            success = test_arm(vehicle)
-        elif args.mission == "test-takeoff":
-            success = test_takeoff(vehicle, args.altitude)
-        elif args.mission == "test-camera":
-            success = test_camera()
-        elif args.mission == "test-detect":
-            success = test_detection(args.model)
-        elif args.mission == "test-motor":
-            success = test_motor(vehicle, args.throttle, args.duration)
-        elif args.mission == "waypoint":
-            success = mission_waypoint(vehicle, args.altitude)
-        elif args.mission == "waypoint-detect":
-            success = mission_waypoint_detect(vehicle, args.altitude, args.model)
-        elif args.mission == "package-delivery":
-            success = mission_package_delivery(vehicle, args.altitude, args.model)
-        elif args.mission == "package-drop":
-            success = mission_package_drop(vehicle, args.altitude, args.model)
-        elif args.mission == "target-localize":
-            success = mission_target_localize(vehicle, args.altitude)
-        elif args.mission == "fix-mode":
-            # Fix the mode after RTL
-            if not vehicle:
-                logging.error("Vehicle connection required for fix-mode")
-                return 1
-            success = set_mode(vehicle, "LOITER")
-            if success:
-                logging.info("Successfully changed vehicle mode to LOITER")
-            else:
-                logging.error("Failed to change vehicle mode")
-        elif args.mission == "diagnostics":
-            from drone.connection import get_vehicle_diagnostics
-            diagnostics = get_vehicle_diagnostics(vehicle, timeout=10)
-            if diagnostics:
-                success = True
-                logging.info("Diagnostics complete - see log for details")
-            else:
-                success = False
-                logging.error("Failed to get diagnostics")
-        elif args.mission == "reset-controller"  or args.mission in ["reset", "r", "2"]:
-            from drone.connection import reset_flight_controller
-            success = reset_flight_controller(vehicle)
-            if success:
-                logging.info("Reset command sent to flight controller")
-            else:
-                logging.error("Failed to send reset command")
-        elif args.mission == "safety-check":
-            from drone.navigation import run_preflight_checks
-            checks_passed, failure_reason = run_preflight_checks(vehicle)
-            success = checks_passed
-            if not success:
-                logging.error(f"Safety checks failed: {failure_reason}")
-            else:
-                logging.info("All safety checks passed!")
+    def create_parser(self) -> argparse.ArgumentParser:
+        """Create and configure argument parser"""
+        parser = argparse.ArgumentParser(
+            description="Drone Mission Control System",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=self._get_help_epilog()
+        )
 
-        elif args.mission == "orientation-check":
-            from drone.navigation import verify_orientation
-            success = verify_orientation(vehicle)
-            if success:
-                logging.info("Orientation is stable and suitable for takeoff")
-            else:
-                logging.warning("Orientation may be unstable - use caution")
+        # Get all possible mission choices (primary names + aliases)
+        all_choices = list(self.config.ALIAS_TO_MISSION.keys())
 
-        elif args.mission == "incremental-takeoff" or args.mission in ["t-t"]:
-            from missions.test_missions import test_incremental_takeoff
-            success = test_incremental_takeoff(vehicle, args.altitude, args.increment)
+        parser.add_argument(
+            "mission",
+            choices=all_choices,
+            help="Mission to execute (use -h to see shortcuts)"
+        )
 
-        elif args.mission == "position-hold-check" :
-            from drone.navigation import verify_position_hold
-            success = verify_position_hold(vehicle)
-        elif args.mission == "check-altitude":
-            from missions.test_missions import monitor_altitude_realtime
-            success = monitor_altitude_realtime(vehicle, duration=0)  # 0 = indefinite
-            if success:
-                logging.info("Altitude monitoring completed")
-            else:
-                logging.error("Altitude monitoring failed")
-        elif args.mission == "preflight-all"  or args.mission in ["pre", "p", "0"]:
-            success = test_connection(vehicle)
-            time.sleep(2)
-            success = test_arm(vehicle)
-            time.sleep(2)
-            success = test_motor(vehicle, args.throttle)
-            time.sleep(2)
-            from drone.navigation import run_preflight_checks
-            checks_passed, failure_reason = run_preflight_checks(vehicle)
-            time.sleep(2)
-            from drone.navigation import verify_orientation
-            success = verify_orientation(vehicle)
-            time.sleep(2)
-            from drone.navigation import verify_position_hold
-            success = verify_position_hold(vehicle)
+        # Mission parameters
+        parser.add_argument("--altitude", type=float, default=3.0,
+                          help="Target altitude in meters")
+        parser.add_argument("--connection", type=str, default="tcp:127.0.0.1:5761",
+                          help="Connection string for the vehicle")
+        parser.add_argument("--model", type=str, default="models/latest.pt",
+                          help="Path to the detection model")
+        parser.add_argument("--duration", type=float, default=1.0,
+                          help="Duration for motor testing")
+        parser.add_argument("--throttle", type=float, default=15.0,
+                          help="Throttle percentage for motor testing (0-100)")
+        parser.add_argument("--increment", type=float, default=1.0,
+                          help="Height increment in meters for incremental takeoff")
+        parser.add_argument("--loops", type=int, default=1,
+                          help="Number of times to repeat the mission")
 
-        elif args.mission == "diamond-waypoints" or args.mission in ["t-w"]:
-            from missions.waypoint import mission_diamond_precision
-            success = mission_diamond_precision_fixed(vehicle, args.altitude, args.loops)
-            if success:
-                logging.info("Diamond waypoint mission completed successfully")
-            else:
-                logging.error("Diamond waypoint mission failed")
-        elif args.mission == "test-servo":
-            success = test_servo_simple(vehicle)
+        return parser
 
+    def _get_help_epilog(self) -> str:
+        """Generate help text showing mission shortcuts"""
+        lines = ["\nMission Shortcuts:"]
+        lines.append("=" * 50)
 
+        for mission, aliases in self.config.MISSION_ALIASES.items():
+            if aliases:  # Only show if there are aliases
+                aliases_str = ", ".join(aliases)
+                lines.append(f"  {mission:<20} → {aliases_str}")
+
+        lines.append("\nExamples:")
+        lines.append("  python main.py c              # test-connection")
+        lines.append("  python main.py pre --altitude 5  # preflight-all at 5m")
+        lines.append("  python main.py t-t --increment 0.5  # incremental takeoff")
+        lines.append("  python main.py diamond --loops 3    # 3 diamond loops")
+
+        return "\n".join(lines)
+
+    def connect_if_needed(self, mission: str, connection_string: str) -> bool:
+        """Connect to vehicle if the mission requires it"""
+        missions_without_vehicle = {"test-camera"}
+
+        if mission in missions_without_vehicle:
+            return True
+
+        logging.info(f"Connecting to vehicle at {connection_string}")
+        self.vehicle = connect_vehicle(connection_string)
+
+        if not self.vehicle:
+            logging.error("Failed to connect to vehicle")
+            return False
+
+        return True
+
+    def execute_mission(self, mission: str, args: argparse.Namespace) -> bool:
+        """Execute the specified mission"""
+        # Resolve mission alias to primary name
+        primary_mission = self.config.ALIAS_TO_MISSION.get(mission, mission)
+
+        # Get handler for the mission
+        handler = self.mission_handlers.get(primary_mission)
+
+        if not handler:
+            logging.error(f"Unknown mission: {mission}")
+            return False
+
+        logging.info(f"Executing mission: {primary_mission} (alias: {mission})")
+
+        try:
+            return handler(args)
+        except Exception as e:
+            logging.exception(f"Mission '{primary_mission}' failed with error: {str(e)}")
+            return False
+
+    # Mission handler methods
+    def _handle_test_connection(self, args) -> bool:
+        return test_connection(self.vehicle)
+
+    def _handle_test_arm(self, args) -> bool:
+        return test_arm(self.vehicle)
+
+    def _handle_test_takeoff(self, args) -> bool:
+        return test_takeoff(self.vehicle, args.altitude)
+
+    def _handle_test_camera(self, args) -> bool:
+        return test_camera()
+
+    def _handle_test_detect(self, args) -> bool:
+        return test_detection(args.model)
+
+    def _handle_test_motor(self, args) -> bool:
+        return test_motor(self.vehicle, args.throttle, args.duration)
+
+    def _handle_test_servo(self, args) -> bool:
+        return test_servo_simple(self.vehicle)
+
+    def _handle_incremental_takeoff(self, args) -> bool:
+        return test_incremental_takeoff(self.vehicle, args.altitude, args.increment)
+
+    def _handle_diamond_waypoints(self, args) -> bool:
+        return mission_diamond_precision_fixed(self.vehicle, args.altitude, args.loops)
+
+    def _handle_waypoint(self, args) -> bool:
+        return mission_waypoint(self.vehicle, args.altitude)
+
+    def _handle_waypoint_detect(self, args) -> bool:
+        return mission_waypoint_detect(self.vehicle, args.altitude, args.model)
+
+    def _handle_package_delivery(self, args) -> bool:
+        return mission_package_delivery(self.vehicle, args.altitude, args.model)
+
+    def _handle_package_drop(self, args) -> bool:
+        return mission_package_drop(self.vehicle, args.altitude, args.model)
+
+    def _handle_target_localize(self, args) -> bool:
+        return mission_target_localize(self.vehicle, args.altitude)
+
+    def _handle_fix_mode(self, args) -> bool:
+        if not self.vehicle:
+            logging.error("Vehicle connection required for fix-mode")
+            return False
+
+        success = set_mode(self.vehicle, "LOITER")
         if success:
-            logging.info(f"Mission '{args.mission}' completed successfully")
-            return 0
+            logging.info("Successfully changed vehicle mode to LOITER")
         else:
-            logging.error(f"Mission '{args.mission}' failed")
-            return 1
+            logging.error("Failed to change vehicle mode")
+        return success
 
-    except KeyboardInterrupt:
-        logging.warning("Mission aborted by user")
-        return 130
-    except Exception as e:
-        logging.exception(f"Mission failed with error: {str(e)}")
-        return 1
-    finally:
-        # Clean up resources
-        if vehicle and mission_requires_vehicle:
-            close_vehicle(vehicle)
-        logging.info("Mission clean-up completed")
+    def _handle_diagnostics(self, args) -> bool:
+        from drone.connection import get_vehicle_diagnostics
+        diagnostics = get_vehicle_diagnostics(self.vehicle, timeout=10)
+        if diagnostics:
+            logging.info("Diagnostics complete - see log for details")
+            return True
+        else:
+            logging.error("Failed to get diagnostics")
+            return False
+
+    def _handle_reset_controller(self, args) -> bool:
+        from drone.connection import reset_flight_controller
+        success = reset_flight_controller(self.vehicle)
+        if success:
+            logging.info("Reset command sent to flight controller")
+        else:
+            logging.error("Failed to send reset command")
+        return success
+
+    def _handle_safety_check(self, args) -> bool:
+        from drone.navigation import run_preflight_checks
+        checks_passed, failure_reason = run_preflight_checks(self.vehicle)
+        if not checks_passed:
+            logging.error(f"Safety checks failed: {failure_reason}")
+        else:
+            logging.info("All safety checks passed!")
+        return checks_passed
+
+    def _handle_orientation_check(self, args) -> bool:
+        from drone.navigation import verify_orientation
+        success = verify_orientation(self.vehicle)
+        if success:
+            logging.info("Orientation is stable and suitable for takeoff")
+        else:
+            logging.warning("Orientation may be unstable - use caution")
+        return success
+
+    def _handle_position_hold_check(self, args) -> bool:
+        from drone.navigation import verify_position_hold
+        return verify_position_hold(self.vehicle)
+
+    def _handle_check_altitude(self, args) -> bool:
+        success = monitor_altitude_realtime(self.vehicle, duration=0)
+        if success:
+            logging.info("Altitude monitoring completed")
+        else:
+            logging.error("Altitude monitoring failed")
+        return success
+
+    def _handle_preflight_all(self, args) -> bool:
+        """Run comprehensive preflight checks"""
+        logging.info("Running comprehensive preflight checks...")
+
+        checks = [
+            ("Connection Test", lambda: test_connection(self.vehicle)),
+            ("Arm Test", lambda: test_arm(self.vehicle)),
+            ("Motor Test", lambda: test_motor(self.vehicle, args.throttle)),
+            ("Safety Checks", self._handle_safety_check),
+            ("Orientation Check", self._handle_orientation_check),
+            ("Position Hold Check", self._handle_position_hold_check),
+        ]
+
+        results = []
+        for check_name, check_func in checks:
+            logging.info(f"Running {check_name}...")
+            try:
+                result = check_func(args) if check_name in ["Safety Checks", "Orientation Check", "Position Hold Check"] else check_func()
+                results.append((check_name, result))
+                logging.info(f"{check_name}: {'PASSED' if result else 'FAILED'}")
+                time.sleep(2)  # Brief pause between checks
+            except Exception as e:
+                logging.error(f"{check_name} failed with exception: {str(e)}")
+                results.append((check_name, False))
+
+        # Summary
+        passed = sum(1 for _, result in results if result)
+        total = len(results)
+
+        logging.info(f"\nPreflight Summary: {passed}/{total} checks passed")
+        for check_name, result in results:
+            status = "✓ PASS" if result else "✗ FAIL"
+            logging.info(f"  {check_name}: {status}")
+
+        return passed == total
+
+    def cleanup(self):
+        """Clean up resources"""
+        if self.vehicle:
+            close_vehicle(self.vehicle)
+            logging.info("Mission clean-up completed")
+
+    def run(self) -> int:
+        """Main execution method"""
+        try:
+            self.setup_logging()
+            parser = self.create_parser()
+            args = parser.parse_args()
+
+            # Connect to vehicle if needed
+            if not self.connect_if_needed(args.mission, args.connection):
+                return 1
+
+            # Execute mission
+            success = self.execute_mission(args.mission, args)
+
+            if success:
+                logging.info(f"Mission '{args.mission}' completed successfully")
+                return 0
+            else:
+                logging.error(f"Mission '{args.mission}' failed")
+                return 1
+
+        except KeyboardInterrupt:
+            logging.warning("Mission aborted by user")
+            return 130
+        except Exception as e:
+            logging.exception(f"Unexpected error: {str(e)}")
+            return 1
+        finally:
+            self.cleanup()
+
+def main():
+    """Entry point"""
+    controller = DroneController()
+    return controller.run()
 
 if __name__ == "__main__":
     sys.exit(main())

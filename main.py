@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py - IMPROVED VERSION
+main.py - IMPROVED VERSION WITH VIDEO RECORDING & BULLSEYE DETECTION
 Drone Control System - Main Launcher
 -----------------------------------
 This script serves as the main entry point for all drone operations.
@@ -28,6 +28,8 @@ from missions.waypoint import (
 from missions.delivery import (
     mission_package_delivery, mission_package_drop, mission_target_localize
 )
+from detection.video_recorder import create_video_recorder
+from detection.bullseye_detector import test_bullseye_detection
 
 class MissionConfig:
     """Configuration class for mission parameters and shortcuts"""
@@ -49,6 +51,12 @@ class MissionConfig:
         "test-camera": ["cam", "camera"],
         "test-servo": ["servo", "s"],
         "test-takeoff": ["takeoff", "to"],
+
+        # NEW: Bullseye detection test
+        "test-bullseye-video": ["bullseye", "bull", "b", "target"],
+
+        # NEW: Video recording test
+        "test-video-recording": ["record-test", "rec-test", "video-test"],
 
         # Advanced missions
         "waypoint": ["wp", "way"],
@@ -78,6 +86,7 @@ class DroneController:
         self.vehicle = None
         self.config = MissionConfig()
         self.mission_handlers = self._setup_mission_handlers()
+        self.video_recorder = None
 
     def _setup_mission_handlers(self) -> Dict[str, Callable]:
         """Setup mission handler mapping"""
@@ -94,6 +103,12 @@ class DroneController:
             "test-camera": self._handle_test_camera,
             "test-servo": self._handle_test_servo,
             "test-detect": self._handle_test_detect,
+
+            # NEW: Bullseye detection test
+            "test-bullseye-video": self._handle_test_bullseye_video,
+
+            # NEW: Video recording test
+            "test-video-recording": self._handle_test_video_recording,
 
             # Takeoff tests
             "test-takeoff": self._handle_test_takeoff,
@@ -165,6 +180,28 @@ class DroneController:
         parser.add_argument("--loops", type=int, default=1,
                           help="Number of times to repeat the mission")
 
+        # NEW: Video recording options
+        parser.add_argument("--record", action="store_true",
+                          help="Record video during mission execution")
+        parser.add_argument("--record-fps", type=float, default=30.0,
+                          help="Recording frame rate (default: 30 FPS)")
+        parser.add_argument("--record-dir", type=str, default="recordings",
+                          help="Directory to save recordings (default: recordings)")
+
+        # NEW: Bullseye detection options
+        parser.add_argument("--source", type=str, default="0",
+                          help="Camera ID, video file, or image file for bullseye detection")
+        parser.add_argument("--display", action="store_true", default=True,
+                          help="Display detection results (default: True)")
+        parser.add_argument("--no-display", dest="display", action="store_false",
+                          help="Disable display of detection results")
+        parser.add_argument("--save-results", action="store_true", default=True,
+                          help="Save detection results (default: True)")
+        parser.add_argument("--no-save", dest="save_results", action="store_false",
+                          help="Disable saving of detection results")
+        parser.add_argument("--video-delay", type=float, default=0.1,
+                          help="Delay between video frames in seconds (default: 0.1)")
+
         return parser
 
     def _get_help_epilog(self) -> str:
@@ -182,14 +219,27 @@ class DroneController:
         lines.append("  python main.py pre --altitude 5  # preflight-all at 5m")
         lines.append("  python main.py t-t --increment 0.5  # incremental takeoff")
         lines.append("  python main.py diamond --loops 3    # 3 diamond loops")
+        lines.append("  python main.py diamond --record     # record video during mission")
+        lines.append("  python main.py bullseye --source video.mp4  # detect bullseyes in video")
+        lines.append("  python main.py bull --source image.jpg --no-display  # process image without display")
+        lines.append("  python main.py record-test --duration 15  # test video recording for 15 seconds")
+        lines.append("  python main.py rec-test --source 1 --duration 30  # test camera 1 for 30 seconds")
 
         return "\n".join(lines)
 
     def connect_if_needed(self, mission: str, connection_string: str) -> bool:
         """Connect to vehicle if the mission requires it"""
-        missions_without_vehicle = {"test-camera"}
+        # Resolve mission alias to primary name FIRST
+        primary_mission = self.config.ALIAS_TO_MISSION.get(mission, mission)
 
-        if mission in missions_without_vehicle:
+        missions_without_vehicle = {
+            "test-camera",
+            "test-bullseye-video",
+            "test-video-recording"  # NEW: For testing video recording without vehicle
+        }
+
+        if primary_mission in missions_without_vehicle:
+            logging.info(f"Mission '{primary_mission}' does not require vehicle connection")
             return True
 
         logging.info(f"Connecting to vehicle at {connection_string}")
@@ -200,6 +250,41 @@ class DroneController:
             return False
 
         return True
+
+    def start_recording_if_requested(self, args, mission_name: str) -> bool:
+        """Start video recording if requested"""
+        if not args.record:
+            return True
+
+        logging.info("Starting video recording...")
+        self.video_recorder = create_video_recorder(
+            output_dir=args.record_dir,
+            fps=args.record_fps
+        )
+
+        success = self.video_recorder.start_recording(
+            camera_id=0,
+            mission_name=mission_name
+        )
+
+        if success:
+            logging.info(f"Recording started for mission: {mission_name}")
+        else:
+            logging.error("Failed to start video recording")
+            self.video_recorder = None
+
+        return success
+
+    def stop_recording_if_active(self):
+        """Stop video recording if active"""
+        if self.video_recorder and self.video_recorder.is_recording():
+            logging.info("Stopping video recording...")
+            success = self.video_recorder.stop_recording()
+            if success:
+                logging.info("Video recording stopped successfully")
+            else:
+                logging.error("Error stopping video recording")
+            self.video_recorder = None
 
     def execute_mission(self, mission: str, args: argparse.Namespace) -> bool:
         """Execute the specified mission"""
@@ -216,10 +301,23 @@ class DroneController:
         logging.info(f"Executing mission: {primary_mission} (alias: {mission})")
 
         try:
-            return handler(args)
+            # Start recording if requested (except for standalone test missions)
+            standalone_missions = {"test-camera", "test-bullseye-video", "test-video-recording"}
+            if primary_mission not in standalone_missions:
+                if not self.start_recording_if_requested(args, primary_mission):
+                    logging.warning("Continuing mission without recording")
+
+            # Execute the mission
+            result = handler(args)
+
+            return result
+
         except Exception as e:
             logging.exception(f"Mission '{primary_mission}' failed with error: {str(e)}")
             return False
+        finally:
+            # Always stop recording when mission ends
+            self.stop_recording_if_active()
 
     # Mission handler methods
     def _handle_test_connection(self, args) -> bool:
@@ -242,6 +340,42 @@ class DroneController:
 
     def _handle_test_servo(self, args) -> bool:
         return test_servo_simple(self.vehicle)
+
+    def _handle_test_bullseye_video(self, args) -> bool:
+        """Handle bullseye detection test"""
+        # Convert source to appropriate type
+        source = args.source
+        try:
+            # Try to convert to int (camera ID)
+            source = int(source)
+        except ValueError:
+            # Keep as string (file path)
+            pass
+
+        return test_bullseye_detection(
+            source=source,
+            display=args.display,
+            save_results=args.save_results,
+            duration=args.duration if isinstance(source, int) else 0,
+            video_delay=args.video_delay
+        )
+
+    def _handle_test_video_recording(self, args) -> bool:
+        """Handle video recording test (no vehicle required)"""
+        from detection.video_recorder import test_video_recording
+
+        # Convert source to camera ID if it's a digit
+        camera_id = 0
+        try:
+            camera_id = int(args.source)
+        except ValueError:
+            logging.warning(f"Invalid camera ID '{args.source}', using camera 0")
+
+        return test_video_recording(
+            camera_id=camera_id,
+            duration=args.duration if args.duration > 1 else 10,  # Default 10 seconds
+            output_dir=args.record_dir
+        )
 
     def _handle_incremental_takeoff(self, args) -> bool:
         return test_incremental_takeoff(self.vehicle, args.altitude, args.increment)
@@ -363,6 +497,10 @@ class DroneController:
 
     def cleanup(self):
         """Clean up resources"""
+        # Stop recording if active
+        self.stop_recording_if_active()
+
+        # Close vehicle connection
         if self.vehicle:
             close_vehicle(self.vehicle)
             logging.info("Mission clean-up completed")

@@ -4,3 +4,4 @@ docs/history/*
 venv
 *.patch
 *.log
+test/*

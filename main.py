@@ -30,6 +30,7 @@ from missions.delivery import (
 )
 from detection.video_recorder import create_video_recorder
 from detection.bullseye_detector import test_bullseye_detection
+from missions.waypoint_bullseye import mission_waypoint_bullseye_detection
 
 class MissionConfig:
     """Configuration class for mission parameters and shortcuts"""
@@ -70,6 +71,8 @@ class MissionConfig:
         "safety-check": ["safety", "safe"],
         "orientation-check": ["orient", "orientation"],
         "position-hold-check": ["pos-hold", "position"],
+
+        "test-waypoint-bullseye": ["waypoint-bullseye", "wb", "bullseye-waypoint"],
     }
 
     # Reverse mapping for quick lookup
@@ -132,6 +135,8 @@ class DroneController:
             "orientation-check": self._handle_orientation_check,
             "position-hold-check": self._handle_position_hold_check,
             "check-altitude": self._handle_check_altitude,
+
+            "test-waypoint-bullseye": self._handle_waypoint_bullseye,
         }
 
     def setup_logging(self):
@@ -202,6 +207,9 @@ class DroneController:
         parser.add_argument("--video-delay", type=float, default=0.1,
                           help="Delay between video frames in seconds (default: 0.1)")
 
+        parser.add_argument("--confidence", type=float, default=0.5,
+                          help="Detection confidence threshold (default: 0.5)")
+
         return parser
 
     def _get_help_epilog(self) -> str:
@@ -224,6 +232,9 @@ class DroneController:
         lines.append("  python main.py bull --source image.jpg --no-display  # process image without display")
         lines.append("  python main.py record-test --duration 15  # test video recording for 15 seconds")
         lines.append("  python main.py rec-test --source 1 --duration 30  # test camera 1 for 30 seconds")
+
+        lines.append("  python main.py wb --altitude 5 --loops 2    # waypoint bullseye mission")
+        lines.append("  python main.py test-waypoint-bullseye --model best.pt --confidence 0.6")
 
         return "\n".join(lines)
 
@@ -458,6 +469,18 @@ class DroneController:
         else:
             logging.error("Altitude monitoring failed")
         return success
+
+    def _handle_waypoint_bullseye(self, args) -> bool:
+        """Handle waypoint bullseye detection and landing mission"""
+        return mission_waypoint_bullseye_detection(
+            vehicle=self.vehicle,
+            altitude=args.altitude,
+            model_path=args.model,
+            confidence=getattr(args, 'confidence', 0.5),
+            loops=args.loops,
+            land_on_detection=True,
+            video_recorder=self.video_recorder  # Pass the shared video recorder
+        )
 
     def _handle_preflight_all(self, args) -> bool:
         """Run comprehensive preflight checks"""

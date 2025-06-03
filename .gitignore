@@ -5,3 +5,5 @@ venv
 *.patch
 *.log
 test/*
+recordings/*
+debug_frames/*

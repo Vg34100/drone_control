@@ -12,6 +12,7 @@ import sys
 import logging
 import time
 from typing import Dict, Callable, Any
+from detection.gcp_detector import test_gcp_detection
 from pymavlink import mavutil
 
 # Import modules
@@ -55,6 +56,7 @@ class MissionConfig:
 
         # NEW: Bullseye detection test
         "test-bullseye-video": ["bullseye", "bull", "b", "target"],
+        "test-gcp-detection": ["gcp", "gcp-test", "g", "ground-control"],  # NEW: GCP detection
 
         # NEW: Video recording test
         "test-video-recording": ["record-test", "rec-test", "video-test"],
@@ -109,6 +111,7 @@ class DroneController:
 
             # NEW: Bullseye detection test
             "test-bullseye-video": self._handle_test_bullseye_video,
+            "test-gcp-detection": self._handle_test_gcp_detection,
 
             # NEW: Video recording test
             "test-video-recording": self._handle_test_video_recording,
@@ -210,6 +213,10 @@ class DroneController:
         parser.add_argument("--confidence", type=float, default=0.5,
                           help="Detection confidence threshold (default: 0.5)")
 
+        # GCP-specific options
+        parser.add_argument("--gcp-confidence", type=float, default=0.5,
+                          help="Confidence threshold for GCP X-pattern detection (default: 0.5)")
+
         return parser
 
     def _get_help_epilog(self) -> str:
@@ -246,7 +253,8 @@ class DroneController:
         missions_without_vehicle = {
             "test-camera",
             "test-bullseye-video",
-            "test-video-recording"  # NEW: For testing video recording without vehicle
+            "test-video-recording",
+            "test-gcp-detection"
         }
 
         if primary_mission in missions_without_vehicle:
@@ -313,7 +321,7 @@ class DroneController:
 
         try:
             # Start recording if requested (except for standalone test missions)
-            standalone_missions = {"test-camera", "test-bullseye-video", "test-video-recording"}
+            standalone_missions = {"test-camera", "test-bullseye-video", "test-gcp-detection", "test-video-recording"}
             if primary_mission not in standalone_missions:
                 if not self.start_recording_if_requested(args, primary_mission):
                     logging.warning("Continuing mission without recording")
@@ -368,7 +376,28 @@ class DroneController:
             display=args.display,
             save_results=args.save_results,
             duration=args.duration if isinstance(source, int) else 0,
-            video_delay=args.video_delay
+            video_delay=args.video_delay,
+            model_path=args.model,
+        )
+
+    def _handle_test_gcp_detection(self, args) -> bool:
+        """Handle GCP detection test"""
+        # Convert source to appropriate type
+        source = args.source
+        try:
+            # Try to convert to int (camera ID)
+            source = int(source)
+        except ValueError:
+            # Keep as string (file path)
+            pass
+
+        return test_gcp_detection(
+            source=source,
+            display=args.display,
+            save_results=args.save_results,
+            duration=args.duration if isinstance(source, int) else 0,
+            video_delay=args.video_delay,
+            confidence=args.gcp_confidence
         )
 
     def _handle_test_video_recording(self, args) -> bool:

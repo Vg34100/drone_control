@@ -16,6 +16,7 @@ from detection.gcp_detector import test_gcp_detection
 from pymavlink import mavutil
 
 # Import modules
+from detection.gcp_yolo_detector import test_gcp_yolo_detection
 from drone.connection import connect_vehicle, close_vehicle
 from drone.navigation import set_mode, test_motors
 from drone.servo import test_servo_simple
@@ -32,6 +33,7 @@ from missions.delivery import (
 from detection.video_recorder import create_video_recorder
 from detection.bullseye_detector import test_bullseye_detection
 from missions.waypoint_bullseye import mission_waypoint_bullseye_detection
+from missions.waypoint_gcp import mission_waypoint_gcp_detection
 
 class MissionConfig:
     """Configuration class for mission parameters and shortcuts"""
@@ -75,6 +77,10 @@ class MissionConfig:
         "position-hold-check": ["pos-hold", "position"],
 
         "test-waypoint-bullseye": ["waypoint-bullseye", "wb", "bullseye-waypoint"],
+
+        # GCP Detection missions
+        "test-gcp-yolo": ["gcp", "gcp-yolo", "test-gcp", "gcp-test"],
+        "test-waypoint-gcp": ["waypoint-gcp", "wgcp", "gcp-waypoint"],
     }
 
     # Reverse mapping for quick lookup
@@ -140,6 +146,10 @@ class DroneController:
             "check-altitude": self._handle_check_altitude,
 
             "test-waypoint-bullseye": self._handle_waypoint_bullseye,
+
+            # GCP detection tests
+            "test-gcp-yolo": self._handle_test_gcp_yolo,
+            "test-waypoint-gcp": self._handle_waypoint_gcp,
         }
 
     def setup_logging(self):
@@ -213,9 +223,12 @@ class DroneController:
         parser.add_argument("--confidence", type=float, default=0.5,
                           help="Detection confidence threshold (default: 0.5)")
 
+
         # GCP-specific options
+        parser.add_argument("--gcp-model", type=str, default="models/best-gcp.pt",
+                          help="Path to GCP YOLO model (default: models/best-gcp.pt)")
         parser.add_argument("--gcp-confidence", type=float, default=0.5,
-                          help="Confidence threshold for GCP X-pattern detection (default: 0.5)")
+                          help="Confidence threshold for GCP detection (default: 0.5)")
 
         return parser
 
@@ -242,6 +255,11 @@ class DroneController:
 
         lines.append("  python main.py wb --altitude 5 --loops 2    # waypoint bullseye mission")
         lines.append("  python main.py test-waypoint-bullseye --model best.pt --confidence 0.6")
+
+        lines.append("  python main.py gcp --source video.mp4  # detect GCP markers in video")
+        lines.append("  python main.py test-gcp-yolo --source 0 --gcp-confidence 0.6  # test GCP detection")
+        lines.append("  python main.py wgcp --altitude 8 --loops 1    # waypoint GCP mission")
+        lines.append("  python main.py test-waypoint-gcp --gcp-model best-gcp.pt --confidence 0.7")
 
         return "\n".join(lines)
 
@@ -510,6 +528,40 @@ class DroneController:
             land_on_detection=True,
             video_recorder=self.video_recorder  # Pass the shared video recorder
         )
+
+    def _handle_test_gcp_yolo(self, args) -> bool:
+        """Handle GCP YOLO detection test"""
+        # Convert source to appropriate type
+        source = args.source
+        try:
+            # Try to convert to int (camera ID)
+            source = int(source)
+        except ValueError:
+            # Keep as string (file path)
+            pass
+
+        return test_gcp_yolo_detection(
+            source=source,
+            display=args.display,
+            save_results=args.save_results,
+            duration=args.duration if isinstance(source, int) else 0,
+            video_delay=args.video_delay,
+            model_path=args.gcp_model,
+            confidence=args.gcp_confidence,
+            imgsz=getattr(args, 'imgsz', 160)
+        )
+
+    def _handle_waypoint_gcp(self, args) -> bool:
+        """Handle waypoint GCP detection and collection mission"""
+        return mission_waypoint_gcp_detection(
+            vehicle=self.vehicle,
+            altitude=args.altitude,
+            model_path=args.gcp_model,
+            confidence=args.gcp_confidence,
+            loops=args.loops,
+            video_recorder=self.video_recorder  # Pass the shared video recorder
+        )
+
 
     def _handle_preflight_all(self, args) -> bool:
         """Run comprehensive preflight checks"""

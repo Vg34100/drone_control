@@ -1,8 +1,9 @@
-# detection/gcp_yolo_detector.py - NEW GCP YOLO DETECTION TEST
+# detection/gcp_yolo_detector.py - UPDATED WITH LAYERED DETECTION
 """
-GCP YOLO Detection Test Module
------------------------------
-Test function for GCP detection using YOLO model, similar to bullseye test.
+GCP YOLO Detection Test Module - Enhanced with Layered Detection
+---------------------------------------------------------------
+Updated to perform layered detection: first check for numbered markers,
+then fallback to general markers if confidence is low.
 """
 
 import cv2
@@ -10,7 +11,7 @@ import numpy as np
 import logging
 import time
 import os
-from typing import List, Tuple, Optional, Union
+from typing import List, Tuple, Optional, Union, Dict
 from pathlib import Path
 
 try:
@@ -21,15 +22,25 @@ except ImportError:
     logging.warning("YOLO not available - install ultralytics: pip install ultralytics")
 
 class GCPYOLODetector:
-    """YOLO-based GCP detector"""
+    """YOLO-based GCP detector with layered detection system"""
 
-    def __init__(self, model_path="models/best-gcp.pt", confidence_threshold=0.5, imgsz=160):
-        """Initialize the GCP detector with YOLO model"""
+    def __init__(self, model_path="models/best-gcp.pt", confidence_threshold=0.5,
+                 numbered_confidence_threshold=0.4, imgsz=160):
+        """
+        Initialize the GCP detector with YOLO model.
+
+        Args:
+            model_path: Path to GCP YOLO model file
+            confidence_threshold: Minimum confidence for general marker detections
+            numbered_confidence_threshold: Lower threshold for numbered marker detection layer
+            imgsz: Model input image size
+        """
         if not YOLO_AVAILABLE:
             raise ImportError("YOLO not available. Install with: pip install ultralytics")
 
         self.model_path = model_path
         self.conf_threshold = confidence_threshold
+        self.numbered_conf_threshold = numbered_confidence_threshold
         self.imgsz = imgsz
 
         # Try to load the model
@@ -51,16 +62,25 @@ class GCPYOLODetector:
                 raise FileNotFoundError(f"Could not find GCP model file. Tried: {model_path}, {alt_paths}")
 
         logging.info(f"Loading GCP YOLO model: {self.model_path}")
+        logging.info(f"General marker confidence threshold: {self.conf_threshold}")
+        logging.info(f"Numbered marker confidence threshold: {self.numbered_conf_threshold}")
         self.model = YOLO(self.model_path)
 
         # Performance tracking
         self.frame_count = 0
         self.total_inference_time = 0
         self.detections_count = 0
+        self.layered_detection_count = 0
 
     def detect_gcp_markers_in_frame(self, frame):
         """
-        Detect GCP markers in a single frame using YOLO model.
+        Detect GCP markers in a single frame using improved detection with NMS.
+
+        IMPROVED LOGIC:
+        1. Run inference with standard confidence threshold
+        2. Apply Non-Maximum Suppression to remove overlapping detections
+        3. For 'markers' class detections, also check if they might be numbered markers
+        4. Keep only the best detection per physical marker
 
         Args:
             frame: Input BGR image
@@ -76,7 +96,7 @@ class GCPYOLODetector:
         try:
             start_time = time.time()
 
-            # Run YOLO inference
+            # Run inference with standard confidence threshold
             results = self.model.predict(
                 frame,
                 imgsz=self.imgsz,
@@ -88,8 +108,8 @@ class GCPYOLODetector:
             self.total_inference_time += inference_time
             self.frame_count += 1
 
-            # Process results
-            gcp_markers = []
+            # Process results and remove overlapping detections
+            all_detections = []
             debug_image = frame.copy()
 
             for result in results:
@@ -103,25 +123,56 @@ class GCPYOLODetector:
                         # Get class name
                         class_name = result.names[class_id] if hasattr(result, 'names') else f"class_{class_id}"
 
-                        # Calculate center
-                        center_x = (x1 + x2) // 2
-                        center_y = (y1 + y2) // 2
+                        # Only keep detections that meet confidence requirements
+                        if class_name == 'marker-numbered' and confidence >= self.numbered_conf_threshold:
+                            use_detection = True
+                        elif class_name == 'markers' and confidence >= self.conf_threshold:
+                            use_detection = True
+                        else:
+                            use_detection = False
 
-                        # Create bbox info dictionary
-                        bbox_info = {
-                            'bbox': (x1, y1, x2, y2),
-                            'width': x2 - x1,
-                            'height': y2 - y1,
-                            'area': (x2 - x1) * (y2 - y1)
-                        }
+                        if use_detection:
+                            # Calculate center
+                            center_x = (x1 + x2) // 2
+                            center_y = (y1 + y2) // 2
 
-                        # Add to GCP markers list
-                        gcp_markers.append((class_name, center_x, center_y, bbox_info, confidence))
-                        self.detections_count += 1
+                            # Store detection for overlap removal
+                            all_detections.append({
+                                'class': class_name,
+                                'bbox': (x1, y1, x2, y2),
+                                'center': (center_x, center_y),
+                                'confidence': confidence,
+                                'area': (x2 - x1) * (y2 - y1)
+                            })
 
-                        # Draw on debug image
-                        self._draw_detection(debug_image, x1, y1, x2, y2, center_x, center_y,
-                                           class_name, confidence)
+            # Remove overlapping detections using distance-based NMS
+            final_detections = self._remove_overlapping_detections(all_detections)
+
+            # LAYERED CHECK: For remaining 'markers', see if they should be 'marker-numbered'
+            enhanced_detections = self._enhance_marker_classification(final_detections, frame)
+
+            # Convert to final format and draw
+            gcp_markers = []
+            for detection in enhanced_detections:
+                class_name = detection['class']
+                center_x, center_y = detection['center']
+                bbox = detection['bbox']
+                confidence = detection['confidence']
+
+                bbox_info = {
+                    'bbox': bbox,
+                    'width': bbox[2] - bbox[0],
+                    'height': bbox[3] - bbox[1],
+                    'area': detection['area']
+                }
+
+                gcp_markers.append((class_name, center_x, center_y, bbox_info, confidence))
+                self.detections_count += 1
+
+                # Draw on debug image
+                x1, y1, x2, y2 = bbox
+                self._draw_detection(debug_image, x1, y1, x2, y2, center_x, center_y,
+                                   class_name, confidence)
 
             # Add frame info to debug image
             self._add_frame_info(debug_image, len(gcp_markers), inference_time)
@@ -129,8 +180,123 @@ class GCPYOLODetector:
             return gcp_markers, debug_image
 
         except Exception as e:
-            logging.error(f"Error in YOLO GCP detection: {str(e)}")
+            logging.error(f"Error in GCP YOLO detection: {str(e)}")
             return [], frame
+
+    def _remove_overlapping_detections(self, detections, overlap_threshold=0.3):
+        """
+        Remove overlapping detections using distance-based approach.
+
+        Args:
+            detections: List of detection dictionaries
+            overlap_threshold: IoU threshold for considering detections as overlapping
+
+        Returns:
+            List of non-overlapping detections
+        """
+        if len(detections) <= 1:
+            return detections
+
+        # Sort by confidence (highest first)
+        sorted_detections = sorted(detections, key=lambda x: x['confidence'], reverse=True)
+        final_detections = []
+
+        for current_det in sorted_detections:
+            is_overlapping = False
+
+            for kept_det in final_detections:
+                # Calculate IoU (Intersection over Union)
+                iou = self._calculate_iou(current_det['bbox'], kept_det['bbox'])
+
+                if iou > overlap_threshold:
+                    is_overlapping = True
+                    break
+
+            if not is_overlapping:
+                final_detections.append(current_det)
+
+        logging.debug(f"Removed {len(detections) - len(final_detections)} overlapping detections")
+        return final_detections
+
+    def _calculate_iou(self, bbox1, bbox2):
+        """Calculate Intersection over Union (IoU) of two bounding boxes."""
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+
+        # Calculate intersection area
+        x1_i = max(x1_1, x1_2)
+        y1_i = max(y1_1, y1_2)
+        x2_i = min(x2_1, x2_2)
+        y2_i = min(y2_1, y2_2)
+
+        if x2_i <= x1_i or y2_i <= y1_i:
+            return 0.0
+
+        intersection_area = (x2_i - x1_i) * (y2_i - y1_i)
+
+        # Calculate union area
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union_area = area1 + area2 - intersection_area
+
+        return intersection_area / union_area if union_area > 0 else 0.0
+
+    def _enhance_marker_classification(self, detections, frame):
+        """
+        For 'markers' class detections, check if they should be 'marker-numbered'.
+        This runs a secondary check with lower confidence on the cropped region.
+        """
+        enhanced_detections = []
+
+        for detection in detections:
+            if detection['class'] == 'markers':
+                # Crop the region and re-run detection with lower threshold
+                x1, y1, x2, y2 = detection['bbox']
+
+                # Add padding to crop
+                padding = 10
+                h, w = frame.shape[:2]
+                x1_crop = max(0, x1 - padding)
+                y1_crop = max(0, y1 - padding)
+                x2_crop = min(w, x2 + padding)
+                y2_crop = min(h, y2 + padding)
+
+                cropped_region = frame[y1_crop:y2_crop, x1_crop:x2_crop]
+
+                if cropped_region.size > 0:
+                    # Re-run detection on cropped region with lower threshold
+                    crop_results = self.model.predict(
+                        cropped_region,
+                        imgsz=self.imgsz,
+                        conf=self.numbered_conf_threshold,
+                        verbose=False
+                    )
+
+                    # Check if any numbered markers found in crop
+                    found_numbered = False
+                    best_numbered_conf = 0
+
+                    for result in crop_results:
+                        if result.boxes is not None:
+                            for box in result.boxes:
+                                class_id = int(box.cls[0])
+                                class_name = result.names[class_id] if hasattr(result, 'names') else f"class_{class_id}"
+                                confidence = float(box.conf[0])
+
+                                if class_name == 'marker-numbered' and confidence >= self.numbered_conf_threshold:
+                                    found_numbered = True
+                                    best_numbered_conf = max(best_numbered_conf, confidence)
+
+                    # If numbered marker found in crop, upgrade the classification
+                    if found_numbered:
+                        detection['class'] = 'marker-numbered'
+                        detection['confidence'] = max(detection['confidence'], best_numbered_conf)
+                        self.layered_detection_count += 1
+                        logging.debug(f"Enhanced general marker to numbered marker (conf: {best_numbered_conf:.3f})")
+
+            enhanced_detections.append(detection)
+
+        return enhanced_detections
 
     def _draw_detection(self, image, x1, y1, x2, y2, center_x, center_y, class_name, confidence):
         """Draw detection on image"""
@@ -176,9 +342,9 @@ class GCPYOLODetector:
         cv2.putText(image, info_text, (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
 
-        # Add detection breakdown
-        markers_count = sum(1 for _ in range(num_detections))  # This would be calculated from actual detections
-        breakdown = f"Markers: {markers_count} | Numbered: {num_detections - markers_count}"
+        # Add detection breakdown with correct counts
+        # Note: gcp_markers should be passed to this function to get accurate counts
+        breakdown = f"Total: {num_detections} | Layered Enhancements: {self.layered_detection_count}"
         cv2.putText(image, breakdown, (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         cv2.putText(image, breakdown, (10, 60),
@@ -201,6 +367,7 @@ class GCPYOLODetector:
         return {
             'total_frames': self.frame_count,
             'total_detections': self.detections_count,
+            'layered_detections': self.layered_detection_count,
             'avg_detections_per_frame': self.detections_count / self.frame_count,
             'avg_fps': avg_fps,
             'avg_inference_ms': avg_inference_ms
@@ -233,11 +400,11 @@ def create_enhanced_gcp_display(original_frame, gcp_markers, debug_image):
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 2)
 
             if markers_count > 0:
-                cv2.putText(enhanced, f"📍 Also found {markers_count} marker(s) for investigation",
+                cv2.putText(enhanced, f"📍 Also found {markers_count} general marker(s) for investigation",
                            (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
         elif markers_count > 0:
-            # Regular markers found (green theme)
+            # General markers found (green theme)
             overlay = enhanced.copy()
             cv2.rectangle(overlay, (0, 0), (width, 80), (0, 150, 0), -1)
             enhanced = cv2.addWeighted(enhanced, 0.7, overlay, 0.3, 0)
@@ -255,7 +422,7 @@ def create_enhanced_gcp_display(original_frame, gcp_markers, debug_image):
                 # Inner circle
                 cv2.circle(enhanced, (center_x, center_y), 50, (255, 255, 255), 3)
             elif class_name == 'markers':
-                # Medium circle for regular markers
+                # Medium circle for general markers
                 cv2.circle(enhanced, (center_x, center_y), 80, (0, 255, 0), 4)
 
     else:
@@ -278,9 +445,10 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
                            video_delay: float = 0.1,
                            model_path: str = "models/best-gcp.pt",
                            confidence: float = 0.5,
+                           numbered_confidence: float = 0.4,
                            imgsz: int = 160) -> bool:
     """
-    Test GCP YOLO detection on camera feed, video file, or image.
+    Test GCP YOLO detection with layered detection system.
 
     Args:
         source: Camera ID (int), video file path, or image file path
@@ -289,18 +457,23 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
         duration: Duration for camera/video (0 = until 'q' pressed)
         video_delay: Delay between frames for video/camera (seconds)
         model_path: Path to GCP YOLO model file
-        confidence: Confidence threshold for detections
+        confidence: Confidence threshold for general markers
+        numbered_confidence: Lower confidence threshold for numbered markers
         imgsz: Model input image size
 
     Returns:
         True if test completed successfully
     """
     try:
-        logging.info(f"Starting GCP YOLO detection test with source: {source}")
+        logging.info(f"Starting GCP YOLO detection test with layered detection")
+        logging.info(f"Source: {source}")
+        logging.info(f"General marker confidence: {confidence}")
+        logging.info(f"Numbered marker confidence: {numbered_confidence}")
 
         detector = GCPYOLODetector(
             model_path=model_path,
             confidence_threshold=confidence,
+            numbered_confidence_threshold=numbered_confidence,
             imgsz=imgsz
         )
 
@@ -354,11 +527,11 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
             if display:
                 cv2.imshow("GCP YOLO Detection Results", enhanced_image)
                 print("\n" + "="*60)
-                print("📸 GCP IMAGE DETECTION RESULTS")
+                print("📸 GCP IMAGE DETECTION RESULTS (LAYERED)")
                 print("="*60)
                 if len(gcp_markers) > 0:
                     print(f"🎯 GCP MARKERS FOUND: {len(gcp_markers)}")
-                    print(f"   📍 Markers: {markers_count}")
+                    print(f"   📍 General markers: {markers_count}")
                     print(f"   🔢 Numbered markers: {numbered_count}")
                     for i, (class_name, x, y, bbox_info, confidence) in enumerate(gcp_markers):
                         print(f"     {class_name} {i+1}: Position ({x}, {y}), Confidence: {confidence:.1%}")
@@ -371,7 +544,7 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
 
             if save_results:
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
-                filename = f"gcp_yolo_detection_{timestamp}.jpg"
+                filename = f"gcp_layered_detection_{timestamp}.jpg"
                 cv2.imwrite(filename, enhanced_image)
                 logging.info(f"Results saved to: {filename}")
 
@@ -392,7 +565,7 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
 
             logging.info(f"Processing {source_type}. Press 'q' to quit, 's' to save frame")
             print("\n" + "="*80)
-            print(f"🎥 {source_type.upper()} GCP YOLO DETECTION")
+            print(f"🎥 {source_type.upper()} GCP LAYERED DETECTION")
             print("="*80)
             print("Controls: 'q' = quit, 's' = save frame, 'p' = pause")
             print("="*80)
@@ -429,7 +602,7 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
                     if frame_numbered > 0:
                         print(f"   🔢 NUMBERED MARKERS: {frame_numbered}")
                     if frame_markers > 0:
-                        print(f"   📍 MARKERS: {frame_markers}")
+                        print(f"   📍 GENERAL MARKERS: {frame_markers}")
 
                     for i, (class_name, x, y, bbox_info, confidence) in enumerate(gcp_markers):
                         print(f"     → {class_name} at ({x}, {y}), confidence: {confidence:.3f}")
@@ -439,14 +612,14 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
 
                 # Display results
                 if display:
-                    cv2.imshow("GCP YOLO Detection", enhanced_image)
+                    cv2.imshow("GCP YOLO Layered Detection", enhanced_image)
 
                     key = cv2.waitKey(int(video_delay * 1000)) & 0xFF
                     if key == ord('q'):
                         break
                     elif key == ord('s') and save_results:
                         timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        filename = f"gcp_yolo_frame_{total_frames}_{timestamp}.jpg"
+                        filename = f"gcp_layered_frame_{total_frames}_{timestamp}.jpg"
                         cv2.imwrite(filename, enhanced_image)
                         logging.info(f"Frame saved: {filename}")
                     elif key == ord('p'):  # Pause
@@ -475,7 +648,7 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
             stats = detector.get_performance_stats()
 
             print("\n" + "="*80)
-            print("📊 GCP YOLO DETECTION SUMMARY")
+            print("📊 GCP LAYERED DETECTION SUMMARY")
             print("="*80)
             print(f"Total frames processed: {total_frames}")
             print(f"Frames with GCP markers: {detection_frames}")
@@ -483,10 +656,11 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
             print(f"Processing time: {total_time:.1f}s")
             print(f"Average FPS: {stats.get('avg_fps', 0):.1f}")
             print(f"Average inference time: {stats.get('avg_inference_ms', 0):.1f}ms")
+            print(f"Layered detections: {stats.get('layered_detections', 0)}")
 
             # Detection breakdown
             print(f"\nDetection Breakdown:")
-            print(f"  📍 Markers detected: {markers_detected}")
+            print(f"  📍 General markers detected: {markers_detected}")
             print(f"  🔢 Numbered markers detected: {numbered_detected}")
 
             if detection_frames > 0:
@@ -494,7 +668,7 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
                 if numbered_detected > 0:
                     print(f"🔢 NUMBERED MARKERS FOUND: {numbered_detected} total detections!")
                 if markers_detected > 0:
-                    print(f"📍 MARKERS FOUND: {markers_detected} total detections!")
+                    print(f"📍 GENERAL MARKERS FOUND: {markers_detected} total detections!")
             else:
                 print("❌ NO GCP MARKERS DETECTED in any frame")
             print("="*80)
@@ -505,11 +679,12 @@ def test_gcp_yolo_detection(source: Union[str, int] = 0,
         logging.error(f"Error during GCP YOLO detection test: {str(e)}")
         return False
 
-def create_gcp_yolo_detector(model_path="models/best-gcp.pt", confidence=0.5, imgsz=160):
+def create_gcp_yolo_detector(model_path="models/best-gcp.pt", confidence=0.5,
+                            numbered_confidence=0.4, imgsz=160):
     """
-    Factory function to create a GCP YOLO detector.
+    Factory function to create a GCP YOLO detector with layered detection.
 
     Returns:
         GCPYOLODetector instance
     """
-    return GCPYOLODetector(model_path, confidence, imgsz)
+    return GCPYOLODetector(model_path, confidence, numbered_confidence, imgsz)

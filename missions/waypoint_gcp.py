@@ -1,9 +1,8 @@
-# missions/waypoint_gcp.py - NEW GCP DETECTION AND COLLECTION MISSION
+# missions/waypoint_gcp.py - UPDATED WITH MINIMAL CHANGES
 """
-GCP Detection with Marker Search and Numbered Marker Collection
---------------------------------------------------------------
-Searches for GCP markers and numbered markers, performing circles around 'markers'
-class detections and collecting 'marker-numbered' class detections to JSON.
+GCP Detection with Marker Search and Numbered Marker Collection - Updated
+------------------------------------------------------------------------
+Added early termination and configurable thresholds while keeping everything else the same.
 """
 
 import logging
@@ -159,7 +158,9 @@ class GCPDetector:
         cv2.circle(image, (w//2, h//2), 3, (0, 255, 255), -1)
 
 def mission_waypoint_gcp_detection(vehicle, altitude=6, model_path="models/best-gcp.pt",
-                                 confidence=0.5, loops=1, video_recorder=None):
+                                 confidence=0.5, loops=1, video_recorder=None,
+                                 min_numbered_markers=3, min_general_markers=3,
+                                 marker_distance_threshold=2.0):
     """
     Execute waypoint mission searching for GCP markers and numbered markers.
 
@@ -170,6 +171,9 @@ def mission_waypoint_gcp_detection(vehicle, altitude=6, model_path="models/best-
         confidence: Detection confidence threshold
         loops: Number of times to repeat waypoint pattern
         video_recorder: Existing video recorder (optional)
+        min_numbered_markers: Minimum numbered markers to find before concluding (default: 3)
+        min_general_markers: Minimum general markers to investigate before concluding (default: 3)
+        marker_distance_threshold: Minimum distance between markers to consider them separate (default: 2.0m)
 
     Returns:
         True if mission completed successfully
@@ -183,6 +187,9 @@ def mission_waypoint_gcp_detection(vehicle, altitude=6, model_path="models/best-
         logging.info(f"Flight altitude: {altitude}m")
         logging.info(f"Model: {model_path}")
         logging.info(f"Confidence threshold: {confidence}")
+        logging.info(f"Min numbered markers for conclusion: {min_numbered_markers}")
+        logging.info(f"Min general markers for conclusion: {min_general_markers}")
+        logging.info(f"Marker distance threshold: {marker_distance_threshold}m")
 
         # Your specific waypoints
         waypoints = [
@@ -200,11 +207,10 @@ def mission_waypoint_gcp_detection(vehicle, altitude=6, model_path="models/best-
         # Initialize collections
         numbered_markers = []  # For marker-numbered detections
         markers_to_investigate = []  # For markers that need circle search
-        current_marker_index = 0
 
         # Create output directories
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = f"gcp_mission_results_{timestamp}"
+        output_dir = f"results/gcp_mission_results_{timestamp}"
         os.makedirs(output_dir, exist_ok=True)
 
         # Run pre-flight checks
@@ -222,48 +228,111 @@ def mission_waypoint_gcp_detection(vehicle, altitude=6, model_path="models/best-
             logging.error("Failed to arm and takeoff")
             return False
 
-        # Fly waypoints and search for GCP markers
-        for i, (target_lat, target_lon) in enumerate(waypoints, 1):
-            logging.info(f"\n📍 Flying to waypoint {i}: {target_lat:.7f}, {target_lon:.7f}")
+        # UPDATED: Fly waypoints with early termination on marker detection
+        for i, (target_lat, target_lon) in enumerate(waypoints):
+            try:
+                # Validate waypoint format
+                if not waypoints or len(waypoints[i]) < 2:
+                    logging.error(f"Invalid waypoint {i+1}: {waypoints[i]}")
+                    continue
 
-            # Send waypoint command
-            command_waypoint(vehicle, target_lat, target_lon, altitude)
+                target_lat, target_lon = waypoints[i][0], waypoints[i][1]
 
-            # Monitor flight path and collect detections
-            path_detections = collect_gcp_detections_during_flight(
-                vehicle, target_lat, target_lon, altitude, detector,
-                video_recorder, numbered_markers, markers_to_investigate, output_dir
-            )
+                # Validate coordinates
+                if not (-90 <= target_lat <= 90) or not (-180 <= target_lon <= 180):
+                    logging.error(f"Invalid coordinates for waypoint {i+1}: {target_lat}, {target_lon}")
+                    continue
 
-            logging.info(f"📊 Path {i} summary: {len([d for d in path_detections if d[0] == 'marker-numbered'])} numbered, "
-                        f"{len([d for d in path_detections if d[0] == 'markers'])} markers")
+                logging.info(f"\n📍 Flying to waypoint {i+1}/{len(waypoints)}: {target_lat:.7f}, {target_lon:.7f}")
+
+                # Send waypoint command with error checking
+                if not command_waypoint(vehicle, target_lat, target_lon, altitude):
+                    logging.error(f"Failed to send waypoint {i+1} command, continuing to next waypoint")
+                    continue
+
+                # Monitor flight path and collect detections with EARLY TERMINATION
+                try:
+                    path_detections, should_terminate = collect_gcp_detections_with_termination(
+                        vehicle, target_lat, target_lon, altitude, detector,
+                        video_recorder, numbered_markers, markers_to_investigate, output_dir,
+                        marker_distance_threshold
+                    )
+
+                    # Count detections safely
+                    numbered_count = sum(1 for d in path_detections if d.get('class') == 'marker-numbered')
+                    markers_count = sum(1 for d in path_detections if d.get('class') == 'markers')
+
+                    logging.info(f"📊 Path {i+1} summary: {numbered_count} numbered, {markers_count} markers")
+
+                    # EARLY TERMINATION: If markers detected, stop waypoint sequence and investigate
+                    if should_terminate:
+                        logging.info(f"🛑 EARLY TERMINATION: Markers detected, starting immediate investigation")
+                        break
+
+                except Exception as path_error:
+                    logging.error(f"Error during path {i+1} detection collection: {str(path_error)}")
+                    continue
+
+            except Exception as waypoint_error:
+                logging.error(f"Error processing waypoint {i+1}: {str(waypoint_error)}")
+                continue
 
         # Process any markers that need circle investigation
         if markers_to_investigate:
             logging.info(f"\n🔍 INVESTIGATING {len(markers_to_investigate)} MARKERS WITH CIRCLE SEARCH")
 
             for marker_idx, marker_location in enumerate(markers_to_investigate):
-                logging.info(f"\n🎯 Investigating marker {marker_idx + 1}/{len(markers_to_investigate)}")
-                logging.info(f"   Location: {marker_location[0]:.7f}, {marker_location[1]:.7f}")
+                try:
+                    # Validate marker location
+                    if not marker_location or len(marker_location) < 2:
+                        logging.error(f"Invalid marker location {marker_idx + 1}: {marker_location}")
+                        continue
 
-                # Go to marker location
-                command_waypoint(vehicle, marker_location[0], marker_location[1], altitude)
+                    logging.info(f"\n🎯 Investigating marker {marker_idx + 1}/{len(markers_to_investigate)}")
+                    logging.info(f"   Location: {marker_location[0]:.7f}, {marker_location[1]:.7f}")
 
-                if not wait_for_waypoint_blocking(vehicle, marker_location[0], marker_location[1],
-                                                altitude, timeout=45, tolerance=1.5):
-                    logging.warning(f"Failed to reach marker {marker_idx + 1}, skipping circle search")
+                    # Go to marker location
+                    if not command_waypoint(vehicle, marker_location[0], marker_location[1], altitude):
+                        logging.error(f"Failed to command waypoint for marker {marker_idx + 1}")
+                        continue
+
+                    if not wait_for_waypoint_blocking(vehicle, marker_location[0], marker_location[1],
+                                                    altitude, timeout=45, tolerance=1.5):
+                        logging.warning(f"Failed to reach marker {marker_idx + 1}, skipping circle search")
+                        continue
+
+                    # Perform 1m circle search around marker with termination conditions
+                    try:
+                        circle_detections, investigation_complete = perform_circle_search(
+                            vehicle, marker_location, detector, video_recorder,
+                            numbered_markers, markers_to_investigate, output_dir,
+                            radius=1.0, min_numbered_markers=min_numbered_markers,
+                            min_general_markers=min_general_markers,
+                            marker_distance_threshold=marker_distance_threshold
+                        )
+
+                        logging.info(f"🔍 Circle search complete: {len(circle_detections)} new detections")
+
+                        # Check if investigation is complete
+                        if investigation_complete:
+                            logging.info(f"🎯 Investigation complete - found sufficient markers")
+                            break
+
+                    except Exception as circle_error:
+                        logging.error(f"Error during circle search for marker {marker_idx + 1}: {str(circle_error)}")
+                        continue
+
+                except Exception as marker_error:
+                    logging.error(f"Error investigating marker {marker_idx + 1}: {str(marker_error)}")
                     continue
-
-                # Perform 1m circle search around marker
-                circle_detections = perform_circle_search(
-                    vehicle, marker_location, detector, video_recorder,
-                    numbered_markers, markers_to_investigate, output_dir, radius=1.0
-                )
-
-                logging.info(f"🔍 Circle search complete: {len(circle_detections)} new detections")
+        else:
+            logging.info("🔍 No markers found that require circle investigation")
 
         # Save numbered markers to JSON
-        save_numbered_markers_json(numbered_markers, output_dir)
+        try:
+            save_numbered_markers_json(numbered_markers, output_dir)
+        except Exception as save_error:
+            logging.error(f"Error saving numbered markers JSON: {str(save_error)}")
 
         # Mission summary
         logging.info(f"\n📊 MISSION SUMMARY:")
@@ -276,227 +345,385 @@ def mission_waypoint_gcp_detection(vehicle, altitude=6, model_path="models/best-
         return_to_launch(vehicle)
         wait_for_landing(vehicle)
 
-        logging.info("🎉 GCP DETECTION MISSION COMPLETED")
+        logging.info("🎉 GCP DETECTION MISSION COMPLETED SUCCESSFULLY")
         return True
 
     except Exception as e:
-        logging.error(f"Error during GCP detection mission: {str(e)}")
+        logging.error(f"Critical error during GCP detection mission: {str(e)}")
+        logging.exception("Full exception details:")
         try:
+            logging.info("Attempting emergency return to launch")
             return_to_launch(vehicle)
-        except:
-            pass
+        except Exception as rtl_error:
+            logging.error(f"Emergency RTL also failed: {str(rtl_error)}")
         return False
 
-def collect_gcp_detections_during_flight(vehicle, target_lat, target_lon, altitude, detector,
-                                        video_recorder, numbered_markers, markers_to_investigate, output_dir):
+def collect_gcp_detections_with_termination(vehicle, target_lat, target_lon, altitude, detector,
+                                           video_recorder, numbered_markers, markers_to_investigate,
+                                           output_dir, marker_distance_threshold=2.0):
     """
-    Collect GCP detections during flight to waypoint.
+    Collect GCP detections during flight to waypoint with early termination capability.
+
+    Returns:
+        (detections, should_terminate): Tuple of detections list and termination flag
     """
     try:
         detections = []
         target_location = (target_lat, target_lon, 0)
-        detection_check_interval = 0.15  # Check every 150ms
+        detection_check_interval = 0.15
         last_check = 0
+        should_terminate = False
+
+        # Add timeout to prevent infinite loops
+        flight_start_time = time.time()
+        max_flight_time = 120
 
         logging.info("🔍 Scanning for GCP markers during flight...")
 
         while True:
             current_time = time.time()
 
+            # Safety timeout check
+            if current_time - flight_start_time > max_flight_time:
+                logging.warning(f"Flight to waypoint timed out after {max_flight_time}s")
+                break
+
             if current_time - last_check >= detection_check_interval:
                 # Get current GPS location
-                current_location = get_location(vehicle)
-                if not current_location:
+                try:
+                    current_location = get_location(vehicle)
+                    if not current_location:
+                        time.sleep(0.05)
+                        continue
+                except Exception as loc_error:
+                    logging.warning(f"Error getting location: {str(loc_error)}")
                     time.sleep(0.05)
                     continue
 
                 # Get camera frame
-                frame = get_camera_frame(video_recorder)
-                if frame is None:
+                try:
+                    frame = get_camera_frame(video_recorder)
+                    if frame is None:
+                        time.sleep(0.05)
+                        continue
+                except Exception as frame_error:
+                    logging.warning(f"Error getting camera frame: {str(frame_error)}")
                     time.sleep(0.05)
                     continue
 
                 # Detect GCP markers
-                gcp_detections, debug_image = detector.detect_gcp_markers_in_frame(frame)
+                try:
+                    gcp_detections, debug_image = detector.detect_gcp_markers_in_frame(frame)
+                except Exception as detection_error:
+                    logging.warning(f"Error during GCP detection: {str(detection_error)}")
+                    time.sleep(0.05)
+                    continue
 
                 # Process each detection
-                for class_name, center_x, center_y, bbox, confidence in gcp_detections:
-                    detection_data = {
-                        'class': class_name,
-                        'gps_location': current_location,
-                        'camera_center': (center_x, center_y),
-                        'bbox': bbox,
-                        'confidence': confidence,
-                        'timestamp': current_time
-                    }
+                for detection_data in gcp_detections:
+                    try:
+                        if len(detection_data) < 5:
+                            logging.warning(f"Invalid detection data format: {detection_data}")
+                            continue
 
-                    detections.append(detection_data)
+                        class_name, center_x, center_y, bbox, confidence = detection_data
 
-                    logging.info(f"🎯 {class_name.upper()} detected: GPS {current_location[0]:.7f}, {current_location[1]:.7f} | "
-                               f"Conf: {confidence:.3f}")
+                        detection_dict = {
+                            'class': class_name,
+                            'gps_location': current_location,
+                            'camera_center': (center_x, center_y),
+                            'bbox': bbox,
+                            'confidence': confidence,
+                            'timestamp': current_time
+                        }
 
-                    # Handle marker-numbered class
-                    if class_name == 'marker-numbered':
-                        save_numbered_marker(detection_data, frame, output_dir, numbered_markers)
+                        detections.append(detection_dict)
 
-                    # Handle markers class
-                    elif class_name == 'markers':
-                        # Add to investigation list if not already close to an existing marker
-                        should_add = True
-                        for existing_marker in markers_to_investigate:
-                            distance = get_distance_metres(current_location, existing_marker)
-                            if distance < 2.0:  # Don't add if within 2m of existing marker
-                                should_add = False
-                                break
+                        logging.info(f"🎯 {class_name.upper()} detected: GPS {current_location[0]:.7f}, {current_location[1]:.7f} | "
+                                   f"Conf: {confidence:.3f}")
 
-                        if should_add:
-                            markers_to_investigate.append(current_location)
-                            logging.info(f"➕ Added marker for circle investigation: {current_location[0]:.7f}, {current_location[1]:.7f}")
+                        # Handle marker-numbered class
+                        if class_name == 'marker-numbered':
+                            try:
+                                save_numbered_marker(detection_dict, frame, output_dir, numbered_markers)
+                            except Exception as save_error:
+                                logging.error(f"Error saving numbered marker: {str(save_error)}")
+
+                        # Handle markers class - SET TERMINATION FLAG
+                        elif class_name == 'markers':
+                            try:
+                                # Add to investigation list if not already close to an existing marker
+                                should_add = True
+                                for existing_marker in markers_to_investigate:
+                                    if len(existing_marker) >= 2:
+                                        distance = get_distance_metres(current_location, existing_marker)
+                                        if distance < marker_distance_threshold:
+                                            should_add = False
+                                            break
+
+                                if should_add:
+                                    markers_to_investigate.append(current_location)
+                                    logging.info(f"➕ Added marker for investigation: {current_location[0]:.7f}, {current_location[1]:.7f}")
+
+                                # SET TERMINATION FLAG when any general marker is detected
+                                should_terminate = True
+                                logging.info(f"🛑 General marker detected - will terminate waypoint sequence after reaching this waypoint")
+
+                            except Exception as marker_error:
+                                logging.error(f"Error processing marker for investigation: {str(marker_error)}")
+
+                    except Exception as process_error:
+                        logging.error(f"Error processing individual detection: {str(process_error)}")
+                        continue
 
                 # Check if reached waypoint
-                distance = get_distance_metres(current_location, target_location)
-                if distance <= 1.5:
-                    logging.info(f"✅ Reached waypoint (distance: {distance:.1f}m)")
-                    break
+                try:
+                    distance = get_distance_metres(current_location, target_location)
+                    if distance <= 1.5:
+                        logging.info(f"✅ Reached waypoint (distance: {distance:.1f}m)")
+                        break
+                except Exception as distance_error:
+                    logging.warning(f"Error calculating distance to waypoint: {str(distance_error)}")
 
                 last_check = current_time
 
             time.sleep(0.02)
 
-        return detections
+        return detections, should_terminate
 
     except Exception as e:
-        logging.error(f"Error during GCP detection collection: {str(e)}")
-        return []
+        logging.error(f"Critical error during GCP detection collection: {str(e)}")
+        return [], False
 
 def perform_circle_search(vehicle, center_location, detector, video_recorder,
-                         numbered_markers, markers_to_investigate, output_dir, radius=1.0, points=8):
+                         numbered_markers, markers_to_investigate, output_dir,
+                         radius=1.0, points=8, min_numbered_markers=3, min_general_markers=3,
+                         marker_distance_threshold=2.0):
     """
-    Perform circle search around a marker location.
+    Perform circle search around a marker location with termination conditions.
+
+    Returns:
+        (circle_detections, investigation_complete): Tuple of detections and completion flag
     """
     try:
+        # Validate input parameters
+        if not center_location or len(center_location) < 3:
+            logging.error(f"Invalid center location: {center_location}")
+            return [], False
+
+        if radius <= 0 or points <= 0:
+            logging.error(f"Invalid circle parameters: radius={radius}, points={points}")
+            return [], False
+
         logging.info(f"🔄 Performing {radius}m circle search with {points} points")
+        logging.info(f"Will conclude if find {min_numbered_markers} numbered or {min_general_markers} general markers")
 
         center_lat, center_lon, center_alt = center_location
         circle_detections = []
 
+        # Track unique markers found
+        unique_numbered_markers = []
+        unique_general_markers = []
+
         for i in range(points):
-            angle = (i * 360 / points) * math.pi / 180
+            try:
+                angle = (i * 360 / points) * math.pi / 180
 
-            north_offset = radius * math.cos(angle)
-            east_offset = radius * math.sin(angle)
+                north_offset = radius * math.cos(angle)
+                east_offset = radius * math.sin(angle)
 
-            search_location = get_location_metres(center_location, north_offset, east_offset)
-            search_lat, search_lon, search_alt = search_location
+                search_location = get_location_metres(center_location, north_offset, east_offset)
+                if not search_location or len(search_location) < 3:
+                    logging.warning(f"Failed to calculate search location for point {i+1}")
+                    continue
 
-            logging.info(f"   🎯 Circle point {i+1}/{points}: {search_lat:.7f}, {search_lon:.7f}")
+                search_lat, search_lon, search_alt = search_location
 
-            # Move to circle point
-            command_waypoint(vehicle, search_lat, search_lon, center_alt)
+                logging.info(f"   🎯 Circle point {i+1}/{points}: {search_lat:.7f}, {search_lon:.7f}")
 
-            # Wait briefly for movement
-            time.sleep(2)
+                # Move to circle point
+                if not command_waypoint(vehicle, search_lat, search_lon, center_alt):
+                    logging.warning(f"Failed to command circle point {i+1}")
+                    continue
 
-            # Check for detections at this point
-            frame = get_camera_frame(video_recorder)
-            if frame is not None:
-                gcp_detections, _ = detector.detect_gcp_markers_in_frame(frame)
+                # Wait briefly for movement
+                time.sleep(2)
 
-                if gcp_detections:
-                    current_location = get_location(vehicle)
-                    if current_location:
-                        for class_name, center_x, center_y, bbox, confidence in gcp_detections:
-                            detection_data = {
-                                'class': class_name,
-                                'gps_location': current_location,
-                                'camera_center': (center_x, center_y),
-                                'bbox': bbox,
-                                'confidence': confidence,
-                                'timestamp': time.time(),
-                                'found_in_circle': True
-                            }
+                # Check for detections at this point
+                try:
+                    frame = get_camera_frame(video_recorder)
+                    if frame is not None:
+                        gcp_detections, _ = detector.detect_gcp_markers_in_frame(frame)
 
-                            circle_detections.append(detection_data)
+                        if gcp_detections:
+                            current_location = get_location(vehicle)
+                            if current_location:
+                                for detection_data in gcp_detections:
+                                    try:
+                                        if len(detection_data) < 5:
+                                            continue
 
-                            logging.info(f"🎯 Circle detection: {class_name} at {current_location[0]:.7f}, {current_location[1]:.7f}")
+                                        class_name, center_x, center_y, bbox, confidence = detection_data
 
-                            # Process detection
-                            if class_name == 'marker-numbered':
-                                save_numbered_marker(detection_data, frame, output_dir, numbered_markers)
-                            elif class_name == 'markers':
-                                # Add new marker for investigation if far enough from existing
-                                should_add = True
-                                for existing_marker in markers_to_investigate:
-                                    distance = get_distance_metres(current_location, existing_marker)
-                                    if distance < 2.0:
-                                        should_add = False
-                                        break
+                                        detection_dict = {
+                                            'class': class_name,
+                                            'gps_location': current_location,
+                                            'camera_center': (center_x, center_y),
+                                            'bbox': bbox,
+                                            'confidence': confidence,
+                                            'timestamp': time.time(),
+                                            'found_in_circle': True
+                                        }
 
-                                if should_add:
-                                    markers_to_investigate.append(current_location)
-                                    logging.info(f"➕ New marker found in circle, added for investigation")
+                                        circle_detections.append(detection_dict)
+
+                                        logging.info(f"🎯 Circle detection: {class_name} at {current_location[0]:.7f}, {current_location[1]:.7f}")
+
+                                        # Check if this is a new unique marker
+                                        is_new_marker = True
+                                        if class_name == 'marker-numbered':
+                                            for existing_loc in unique_numbered_markers:
+                                                if get_distance_metres(current_location, existing_loc) < marker_distance_threshold:
+                                                    is_new_marker = False
+                                                    break
+                                            if is_new_marker:
+                                                unique_numbered_markers.append(current_location)
+                                                save_numbered_marker(detection_dict, frame, output_dir, numbered_markers)
+                                        elif class_name == 'markers':
+                                            for existing_loc in unique_general_markers:
+                                                if get_distance_metres(current_location, existing_loc) < marker_distance_threshold:
+                                                    is_new_marker = False
+                                                    break
+                                            if is_new_marker:
+                                                unique_general_markers.append(current_location)
+                                                markers_to_investigate.append(current_location)
+                                                logging.info(f"➕ New marker found in circle, added for investigation")
+
+                                        # CHECK TERMINATION CONDITIONS
+                                        if len(unique_numbered_markers) >= min_numbered_markers:
+                                            logging.info(f"🎯 Found {len(unique_numbered_markers)} numbered markers - concluding circle search")
+                                            return circle_detections, True
+                                        elif len(unique_general_markers) >= min_general_markers:
+                                            logging.info(f"📍 Investigated {len(unique_general_markers)} general markers - concluding circle search")
+                                            return circle_detections, True
+
+                                    except Exception as det_error:
+                                        logging.error(f"Error processing circle detection: {str(det_error)}")
+                                        continue
+                except Exception as frame_error:
+                    logging.warning(f"Error processing frame at circle point {i+1}: {str(frame_error)}")
+
+            except Exception as point_error:
+                logging.error(f"Error at circle point {i+1}: {str(point_error)}")
+                continue
 
         # Return to center after circle
-        command_waypoint(vehicle, center_lat, center_lon, center_alt)
-        time.sleep(2)
+        try:
+            command_waypoint(vehicle, center_lat, center_lon, center_alt)
+            time.sleep(2)
+        except Exception as return_error:
+            logging.warning(f"Error returning to circle center: {str(return_error)}")
 
-        return circle_detections
+        return circle_detections, False
 
     except Exception as e:
-        logging.error(f"Error during circle search: {str(e)}")
-        return []
+        logging.error(f"Critical error during circle search: {str(e)}")
+        return [], False
 
 def save_numbered_marker(detection_data, frame, output_dir, numbered_markers):
     """
     Save numbered marker detection to JSON and crop image.
     """
     try:
+        # Validate inputs
+        if not detection_data or 'bbox' not in detection_data:
+            logging.error("Invalid detection data for saving numbered marker")
+            return
+
+        if frame is None:
+            logging.error("No frame provided for saving numbered marker")
+            return
+
         marker_id = len(numbered_markers) + 1
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
         # Crop the detected region
-        x1, y1, x2, y2 = detection_data['bbox']
+        try:
+            x1, y1, x2, y2 = detection_data['bbox']
 
-        # Add some padding to the crop
-        padding = 20
-        h, w = frame.shape[:2]
-        x1_crop = max(0, x1 - padding)
-        y1_crop = max(0, y1 - padding)
-        x2_crop = min(w, x2 + padding)
-        y2_crop = min(h, y2 + padding)
+            # Validate bbox coordinates
+            h, w = frame.shape[:2]
+            if x1 < 0 or y1 < 0 or x2 > w or y2 > h or x1 >= x2 or y1 >= y2:
+                logging.warning(f"Invalid bbox coordinates: {detection_data['bbox']}, frame size: {w}x{h}")
+                # Use center crop as fallback
+                center_x, center_y = detection_data.get('camera_center', (w//2, h//2))
+                crop_size = 50
+                x1 = max(0, center_x - crop_size)
+                y1 = max(0, center_y - crop_size)
+                x2 = min(w, center_x + crop_size)
+                y2 = min(h, center_y + crop_size)
 
-        cropped_image = frame[y1_crop:y2_crop, x1_crop:x2_crop]
+            # Add some padding to the crop
+            padding = 20
+            x1_crop = max(0, x1 - padding)
+            y1_crop = max(0, y1 - padding)
+            x2_crop = min(w, x2 + padding)
+            y2_crop = min(h, y2 + padding)
+
+            cropped_image = frame[y1_crop:y2_crop, x1_crop:x2_crop]
+
+            if cropped_image.size == 0:
+                logging.error("Cropped image is empty, using full frame")
+                cropped_image = frame
+
+        except Exception as crop_error:
+            logging.error(f"Error cropping image: {str(crop_error)}, using full frame")
+            cropped_image = frame
 
         # Save cropped image
-        crop_filename = f"numbered_marker_{marker_id:03d}_{timestamp}.jpg"
-        crop_path = os.path.join(output_dir, crop_filename)
-        cv2.imwrite(crop_path, cropped_image)
+        try:
+            crop_filename = f"numbered_marker_{marker_id:03d}_{timestamp}.jpg"
+            crop_path = os.path.join(output_dir, crop_filename)
+            cv2.imwrite(crop_path, cropped_image)
+        except Exception as save_error:
+            logging.error(f"Error saving cropped image: {str(save_error)}")
+            crop_filename = "save_failed.jpg"
 
         # Prepare data for JSON
-        marker_data = {
-            'id': marker_id,
-            'gps_location': {
-                'latitude': detection_data['gps_location'][0],
-                'longitude': detection_data['gps_location'][1],
-                'altitude': detection_data['gps_location'][2]
-            },
-            'detection': {
-                'camera_center': detection_data['camera_center'],
-                'bbox': detection_data['bbox'],
-                'confidence': detection_data['confidence']
-            },
-            'timestamp': detection_data['timestamp'],
-            'timestamp_str': datetime.fromtimestamp(detection_data['timestamp']).isoformat(),
-            'cropped_image_path': crop_filename,
-            'found_in_circle': detection_data.get('found_in_circle', False)
-        }
+        try:
+            gps_location = detection_data.get('gps_location', (0, 0, 0))
+            camera_center = detection_data.get('camera_center', (0, 0))
+            bbox = detection_data.get('bbox', (0, 0, 0, 0))
+            confidence = detection_data.get('confidence', 0.0)
+            timestamp_val = detection_data.get('timestamp', time.time())
 
-        numbered_markers.append(marker_data)
+            marker_data = {
+                'id': marker_id,
+                'gps_location': {
+                    'latitude': gps_location[0],
+                    'longitude': gps_location[1],
+                    'altitude': gps_location[2]
+                },
+                'detection': {
+                    'camera_center': camera_center,
+                    'bbox': bbox,
+                    'confidence': confidence
+                },
+                'timestamp': timestamp_val,
+                'timestamp_str': datetime.fromtimestamp(timestamp_val).isoformat(),
+                'cropped_image_path': crop_filename,
+                'found_in_circle': detection_data.get('found_in_circle', False)
+            }
 
-        logging.info(f"💾 Saved numbered marker #{marker_id}: {crop_filename}")
+            numbered_markers.append(marker_data)
+
+            logging.info(f"💾 Saved numbered marker #{marker_id}: {crop_filename}")
+
+        except Exception as data_error:
+            logging.error(f"Error preparing numbered marker data: {str(data_error)}")
 
     except Exception as e:
-        logging.error(f"Error saving numbered marker: {str(e)}")
+        logging.error(f"Critical error saving numbered marker: {str(e)}")
 
 def save_numbered_markers_json(numbered_markers, output_dir):
     """
@@ -521,7 +748,7 @@ def save_numbered_markers_json(numbered_markers, output_dir):
         logging.error(f"Error saving JSON file: {str(e)}")
 
 def get_camera_frame(video_recorder):
-    """Get frame from shared video recorder"""
+    """Get frame from shared video recorder with error handling"""
     try:
         if video_recorder is not None and hasattr(video_recorder, 'cap') and video_recorder.cap is not None:
             ret, frame = video_recorder.cap.read()
@@ -533,8 +760,21 @@ def get_camera_frame(video_recorder):
         return None
 
 def command_waypoint(vehicle, lat, lon, alt):
-    """Send waypoint command"""
+    """Send waypoint command with error handling"""
     try:
+        if not vehicle:
+            logging.error("No vehicle connection for waypoint command")
+            return False
+
+        # Validate coordinates
+        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            logging.error(f"Invalid coordinates: lat={lat}, lon={lon}")
+            return False
+
+        if alt < 0:
+            logging.warning(f"Negative altitude: {alt}, using absolute value")
+            alt = abs(alt)
+
         vehicle.mav.set_position_target_global_int_send(
             0, vehicle.target_system, vehicle.target_component,
             mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
@@ -544,11 +784,11 @@ def command_waypoint(vehicle, lat, lon, alt):
         )
         return True
     except Exception as e:
-        logging.error(f"Error sending waypoint: {str(e)}")
+        logging.error(f"Error sending waypoint command: {str(e)}")
         return False
 
 def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, target_altitude, timeout=45, tolerance=1.5):
-    """Blocking wait for waypoint arrival"""
+    """Blocking wait for waypoint arrival with error handling"""
     if not vehicle:
         return False
 
@@ -558,18 +798,37 @@ def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, target_altitude,
         stable_count = 0
         required_stable_readings = 3
 
-        while time.time() - start_time < timeout:
-            current_location = get_location(vehicle)
-            if current_location:
-                distance = get_distance_metres(current_location, target_location)
+        # Add safety checks
+        position_check_failures = 0
+        max_position_failures = 5
 
-                if distance <= tolerance:
-                    stable_count += 1
-                    if stable_count >= required_stable_readings:
-                        logging.info(f"✅ Waypoint reached (distance: {distance:.2f}m)")
-                        return True
+        while time.time() - start_time < timeout:
+            try:
+                current_location = get_location(vehicle)
+                if current_location:
+                    distance = get_distance_metres(current_location, target_location)
+
+                    if distance <= tolerance:
+                        stable_count += 1
+                        if stable_count >= required_stable_readings:
+                            logging.info(f"✅ Waypoint reached (distance: {distance:.2f}m)")
+                            return True
+                    else:
+                        stable_count = 0
+
+                    position_check_failures = 0  # Reset failure count on success
                 else:
-                    stable_count = 0
+                    position_check_failures += 1
+                    if position_check_failures >= max_position_failures:
+                        logging.error("Too many position check failures")
+                        return False
+
+            except Exception as check_error:
+                logging.warning(f"Error during waypoint check: {str(check_error)}")
+                position_check_failures += 1
+                if position_check_failures >= max_position_failures:
+                    logging.error("Too many waypoint check errors")
+                    return False
 
             time.sleep(0.3)
 
@@ -581,13 +840,24 @@ def wait_for_waypoint_blocking(vehicle, target_lat, target_lon, target_altitude,
         return False
 
 def wait_for_landing(vehicle):
-    """Wait for vehicle to land and disarm"""
+    """Wait for vehicle to land and disarm with error handling"""
     try:
         start_time = time.time()
-        while time.time() - start_time < 120:
-            if not check_if_armed(vehicle):
-                logging.info("✅ Vehicle has landed and disarmed")
-                break
+        timeout = 120  # 2 minutes timeout
+
+        while time.time() - start_time < timeout:
+            try:
+                if not check_if_armed(vehicle):
+                    logging.info("✅ Vehicle has landed and disarmed")
+                    break
+            except Exception as check_error:
+                logging.warning(f"Error checking armed status: {str(check_error)}")
+
             time.sleep(2)
-    except:
-        pass
+
+        if time.time() - start_time >= timeout:
+            logging.warning("Landing wait timed out")
+
+    except Exception as e:
+        logging.error(f"Error waiting for landing: {str(e)}")
+        # Don't fail the mission for landing wait errors

@@ -1165,57 +1165,91 @@ def run_preflight_checks(vehicle, min_gps_fix=3, min_battery=50, check_compass=T
         if not msg:
             failures.append("No heartbeat from vehicle")
 
-        # Check 2: GPS status
+        # Check 2: GPS status (IMPROVED - Multiple attempts)
         logging.info("Check 2: Verifying GPS status...")
+
+        # Request GPS data stream
         vehicle.mav.request_data_stream_send(
             vehicle.target_system, vehicle.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_POSITION, 2, 1)
 
-        start_time = time.time()
+        # Also request GPS_RAW_INT specifically
+        vehicle.mav.command_long_send(
+            vehicle.target_system, vehicle.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+            mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT,
+            500000,  # 2 Hz in microseconds
+            0, 0, 0, 0, 0
+        )
+
         gps_check_passed = False
-        fix_type = 0  # Initialize with default value
-        satellites = 0  # Initialize with default value
+        fix_type = 0
+        satellites = 0
+        max_attempts = 3
+        attempt_timeout = 5  # 5 seconds per attempt
 
-        while time.time() - start_time < 3:
-            msg = vehicle.recv_match(type='GPS_RAW_INT', blocking=False)
-            if msg:
-                fix_type = msg.fix_type
-                satellites = msg.satellites_visible
+        for attempt in range(max_attempts):
+            logging.info(f"GPS check attempt {attempt + 1}/{max_attempts}")
 
-                # Define fix type names
-                fix_type_name = "No GPS" if fix_type == 0 else \
-                               "No Fix" if fix_type == 1 else \
-                               "2D Fix" if fix_type == 2 else \
-                               "3D Fix" if fix_type == 3 else \
-                               "3D DGPS" if fix_type == 4 else \
-                               "RTK Float" if fix_type == 5 else \
-                               "RTK Fixed" if fix_type == 6 else \
-                               f"Fix Type {fix_type}"
+            start_time = time.time()
+            got_gps_data = False
 
-                logging.info(f"GPS: {fix_type_name} with {satellites} satellites")
+            while time.time() - start_time < attempt_timeout:
+                msg = vehicle.recv_match(type='GPS_RAW_INT', blocking=False)
+                if msg:
+                    fix_type = msg.fix_type
+                    satellites = msg.satellites_visible
+                    got_gps_data = True
 
-                if fix_type >= min_gps_fix:
-                    gps_check_passed = True
-                    break
+                    # Define fix type names
+                    fix_type_name = "No GPS" if fix_type == 0 else \
+                                "No Fix" if fix_type == 1 else \
+                                "2D Fix" if fix_type == 2 else \
+                                "3D Fix" if fix_type == 3 else \
+                                "3D DGPS" if fix_type == 4 else \
+                                "RTK Float" if fix_type == 5 else \
+                                "RTK Fixed" if fix_type == 6 else \
+                                f"Fix Type {fix_type}"
 
-            time.sleep(0.2)
+                    logging.info(f"GPS: {fix_type_name} with {satellites} satellites")
 
-        # Handle case where no GPS message was received
+                    if fix_type >= min_gps_fix:
+                        gps_check_passed = True
+                        logging.info(f"✓ GPS check passed on attempt {attempt + 1}")
+                        break
+
+                time.sleep(0.2)
+
+            if gps_check_passed:
+                break
+
+            if not got_gps_data:
+                logging.warning(f"No GPS data received on attempt {attempt + 1}")
+            else:
+                logging.warning(f"GPS fix insufficient on attempt {attempt + 1}: {fix_type_name}")
+
+            if attempt < max_attempts - 1:
+                logging.info("Waiting 2 seconds before next GPS check attempt...")
+                time.sleep(2)
+
+        # Final GPS check result
         if not gps_check_passed:
             if fix_type == 0:
-                fix_type_name = "No GPS data received"
+                failure_msg = "GPS: No GPS data received after multiple attempts"
             else:
                 fix_type_name = "No GPS" if fix_type == 0 else \
-                               "No Fix" if fix_type == 1 else \
-                               "2D Fix" if fix_type == 2 else \
-                               "3D Fix" if fix_type == 3 else \
-                               "3D DGPS" if fix_type == 4 else \
-                               "RTK Float" if fix_type == 5 else \
-                               "RTK Fixed" if fix_type == 6 else \
-                               f"Fix Type {fix_type}"
+                            "No Fix" if fix_type == 1 else \
+                            "2D Fix" if fix_type == 2 else \
+                            "3D Fix" if fix_type == 3 else \
+                            "3D DGPS" if fix_type == 4 else \
+                            "RTK Float" if fix_type == 5 else \
+                            "RTK Fixed" if fix_type == 6 else \
+                            f"Fix Type {fix_type}"
+                failure_msg = f"GPS fix type below minimum required (current: {fix_type_name}, required: 3D fix or better)"
 
-            failures.append(f"GPS fix type below minimum required (current: {fix_type_name}, required: 3D fix or better)")
-
+            failures.append(failure_msg)
+        else:
+            logging.info("✓ GPS check passed - good GPS fix available")
         # Check 3: Battery level
         logging.info("Check 3: Verifying battery level...")
         vehicle.mav.request_data_stream_send(

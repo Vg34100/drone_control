@@ -15,7 +15,6 @@ from drone.navigation import (
     return_to_launch, check_if_armed, test_motors, get_altitude, get_location, wait_for_altitude_blocking
 )
 from detection.camera import test_camera_feed
-from detection.models import load_detection_model, test_detection_model
 
 def test_connection(vehicle):
     """
@@ -286,33 +285,6 @@ def test_camera(camera_id=0, duration=10):
         logging.error(f"Error during camera test: {str(e)}")
         return False
 
-def test_detection(model_path, test_source="0", duration=10):
-    """
-    Test the object detection model.
-
-    Args:
-        model_path: Path to the detection model
-        test_source: Source for testing (0 for webcam, or path to image/video)
-        duration: Test duration in seconds
-
-    Returns:
-        True if test was successful, False otherwise
-    """
-    try:
-        logging.info(f"Testing detection model {model_path}")
-
-        # Load the model
-        model = load_detection_model(model_path)
-        if not model:
-            logging.error("Failed to load detection model")
-            return False
-
-        # Test the model
-        return test_detection_model(model, test_source, duration=duration)
-    except Exception as e:
-        logging.error(f"Error during detection test: {str(e)}")
-        return False
-
 def test_motor(vehicle, throttle_percentage=15, duration_per_motor=1):
     """
     Test each motor individually.
@@ -350,57 +322,6 @@ def test_motor(vehicle, throttle_percentage=15, duration_per_motor=1):
     except Exception as e:
         logging.error(f"Error during motor test: {str(e)}")
         return False
-
-def test_all(vehicle, model_path, altitude=3, camera_id=0):
-    """
-    Run all tests sequentially.
-
-    Args:
-        vehicle: The connected mavlink object
-        model_path: Path to the detection model
-        altitude: Target altitude in meters
-        camera_id: Camera ID to use
-
-    Returns:
-        Dictionary with test results
-    """
-    results = {}
-
-    # Test connection
-    logging.info("=== STARTING CONNECTION TEST ===")
-    results['connection'] = test_connection(vehicle)
-
-    # Test camera
-    logging.info("=== STARTING CAMERA TEST ===")
-    results['camera'] = test_camera(camera_id)
-
-    # Test detection
-    logging.info("=== STARTING DETECTION TEST ===")
-    results['detection'] = test_detection(model_path)
-
-    # Test arm
-    logging.info("=== STARTING ARM TEST ===")
-    results['arm'] = test_arm(vehicle)
-
-    # Test motors (CAUTION: only if safe)
-    logging.info("=== SKIPPING MOTOR TEST (Run individually if needed) ===")
-    results['motor'] = False
-
-    # Test takeoff (last since it involves actual flight)
-    logging.info("=== STARTING TAKEOFF TEST ===")
-    results['takeoff'] = test_takeoff(vehicle, altitude)
-
-    # Print summary
-    logging.info("=== TEST SUMMARY ===")
-    for test, result in results.items():
-        status = "PASSED" if result else "FAILED"
-        logging.info(f"Test '{test}': {status}")
-
-    # Overall result
-    results['all_passed'] = all(results.values())
-
-    return results
-
 
 # --- missions/test_missions.py ---
 def test_incremental_takeoff(vehicle, max_altitude=3, increment=1):

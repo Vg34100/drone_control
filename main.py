@@ -12,7 +12,6 @@ import sys
 import logging
 import time
 from typing import Dict, Callable, Any
-from detection.gcp_detector import test_gcp_detection
 from pymavlink import mavutil
 
 # Import modules
@@ -21,14 +20,11 @@ from drone.connection import connect_vehicle, close_vehicle
 from drone.navigation import set_mode, test_motors
 from drone.servo import test_servo_simple
 from missions.test_missions import (
-    test_connection, test_arm, test_takeoff, test_camera, test_detection,
+    test_connection, test_arm, test_takeoff, test_camera,
     test_motor, test_incremental_takeoff, monitor_altitude_realtime
 )
 from missions.waypoint import (
-    mission_diamond_precision_fixed, mission_waypoint, mission_waypoint_detect
-)
-from missions.delivery import (
-    mission_package_delivery, mission_package_drop, mission_target_localize
+    mission_diamond_precision_fixed, mission_waypoint
 )
 from detection.video_recorder import create_video_recorder
 from detection.bullseye_detector import test_bullseye_detection
@@ -62,12 +58,6 @@ class MissionConfig:
 
         # NEW: Video recording test
         "test-video-recording": ["record-test", "rec-test", "video-test"],
-
-        # Advanced missions
-        "waypoint": ["wp", "way"],
-        "package-delivery": ["delivery", "del"],
-        "package-drop": ["drop", "pd"],
-        "target-localize": ["localize", "loc"],
 
         # Diagnostics
         "diagnostics": ["diag", "d"],
@@ -106,18 +96,12 @@ class DroneController:
             "test-connection": self._handle_test_connection,
             "preflight-all": self._handle_preflight_all,
             "reset-controller": self._handle_reset_controller,
-            "diagnostics": self._handle_diagnostics,
 
             # Basic tests
             "test-arm": self._handle_test_arm,
             "test-motor": self._handle_test_motor,
             "test-camera": self._handle_test_camera,
             "test-servo": self._handle_test_servo,
-            "test-detect": self._handle_test_detect,
-
-            # NEW: Bullseye detection test
-            "test-bullseye-video": self._handle_test_bullseye_video,
-            "test-gcp-detection": self._handle_test_gcp_detection,
 
             # NEW: Video recording test
             "test-video-recording": self._handle_test_video_recording,
@@ -129,27 +113,25 @@ class DroneController:
 
             # Navigation missions
             "waypoint": self._handle_waypoint,
-            "waypoint-detect": self._handle_waypoint_detect,
-
-            # Delivery missions
-            "package-delivery": self._handle_package_delivery,
-            "package-drop": self._handle_package_drop,
-            "target-localize": self._handle_target_localize,
 
             # System controls
             "fix-mode": self._handle_fix_mode,
 
             # Safety checks
+            "diagnostics": self._handle_diagnostics,
             "safety-check": self._handle_safety_check,
             "orientation-check": self._handle_orientation_check,
             "position-hold-check": self._handle_position_hold_check,
             "check-altitude": self._handle_check_altitude,
 
-            "test-waypoint-bullseye": self._handle_waypoint_bullseye,
-
-            # GCP detection tests
+            # Video Tests
+            "test-bullseye-video": self._handle_test_bullseye_video,
             "test-gcp-yolo": self._handle_test_gcp_yolo,
+
+            "test-waypoint-bullseye": self._handle_waypoint_bullseye,
             "test-waypoint-gcp": self._handle_waypoint_gcp,
+
+
         }
 
     def setup_logging(self):
@@ -370,9 +352,6 @@ class DroneController:
     def _handle_test_camera(self, args) -> bool:
         return test_camera()
 
-    def _handle_test_detect(self, args) -> bool:
-        return test_detection(args.model)
-
     def _handle_test_motor(self, args) -> bool:
         return test_motor(self.vehicle, args.throttle, args.duration)
 
@@ -397,26 +376,6 @@ class DroneController:
             duration=args.duration if isinstance(source, int) else 0,
             video_delay=args.video_delay,
             model_path=args.model,
-        )
-
-    def _handle_test_gcp_detection(self, args) -> bool:
-        """Handle GCP detection test"""
-        # Convert source to appropriate type
-        source = args.source
-        try:
-            # Try to convert to int (camera ID)
-            source = int(source)
-        except ValueError:
-            # Keep as string (file path)
-            pass
-
-        return test_gcp_detection(
-            source=source,
-            display=args.display,
-            save_results=args.save_results,
-            duration=args.duration if isinstance(source, int) else 0,
-            video_delay=args.video_delay,
-            confidence=args.gcp_confidence
         )
 
     def _handle_test_video_recording(self, args) -> bool:
@@ -444,18 +403,6 @@ class DroneController:
 
     def _handle_waypoint(self, args) -> bool:
         return mission_waypoint(self.vehicle, args.altitude)
-
-    def _handle_waypoint_detect(self, args) -> bool:
-        return mission_waypoint_detect(self.vehicle, args.altitude, args.model)
-
-    def _handle_package_delivery(self, args) -> bool:
-        return mission_package_delivery(self.vehicle, args.altitude, args.model)
-
-    def _handle_package_drop(self, args) -> bool:
-        return mission_package_drop(self.vehicle, args.altitude, args.model)
-
-    def _handle_target_localize(self, args) -> bool:
-        return mission_target_localize(self.vehicle, args.altitude)
 
     def _handle_fix_mode(self, args) -> bool:
         if not self.vehicle:

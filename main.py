@@ -272,7 +272,8 @@ class DroneController:
             "test-camera",
             "test-bullseye-video",
             "test-video-recording",
-            "test-gcp-detection"
+            "test-gcp-detection",
+            "test-gcp-yolo",
         }
 
         if primary_mission in missions_without_vehicle:

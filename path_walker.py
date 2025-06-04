@@ -160,5 +160,5 @@ print_directory_structure(
     '',
     output_file,
     accepted=('.py'),
-    custom_ignore_patterns=[]  # Add any patterns you want to ignore
+    custom_ignore_patterns=['*debug*', '*models*', 'path_walker.py']  # Add any patterns you want to ignore
 )

@@ -12,6 +12,7 @@ import sys
 import logging
 import time
 from typing import Dict, Callable, Any
+from missions.waypoint_comp_area_gcp import mission_competition_area_gcp
 from pymavlink import mavutil
 
 # Import modules
@@ -71,6 +72,8 @@ class MissionConfig:
         # GCP Detection missions
         "test-gcp-yolo": ["gcp", "gcp-yolo", "test-gcp", "gcp-test"],
         "test-waypoint-gcp": ["waypoint-gcp", "wgcp", "gcp-waypoint"],
+
+        "test-comp-area-gcp": ["comp-area", "comp-gcp", "area-gcp", "competition-area"],
     }
 
     # Reverse mapping for quick lookup
@@ -131,7 +134,7 @@ class DroneController:
             "test-waypoint-bullseye": self._handle_waypoint_bullseye,
             "test-waypoint-gcp": self._handle_waypoint_gcp,
 
-
+            "test-comp-area-gcp": self._handle_comp_area_gcp,
         }
 
     def setup_logging(self):
@@ -242,6 +245,9 @@ class DroneController:
         lines.append("  python main.py test-gcp-yolo --source 0 --gcp-confidence 0.6  # test GCP detection")
         lines.append("  python main.py wgcp --altitude 8 --loops 1    # waypoint GCP mission")
         lines.append("  python main.py test-waypoint-gcp --gcp-model best-gcp.pt --confidence 0.7")
+
+        lines.append("  python main.py comp-area --altitude 8 --gcp-confidence 0.6  # competition area GCP mission")
+        lines.append("  python main.py test-comp-area-gcp --gcp-model best-gcp.pt --altitude 10")
 
         return "\n".join(lines)
 
@@ -508,6 +514,16 @@ class DroneController:
             confidence=args.gcp_confidence,
             loops=args.loops,
             video_recorder=self.video_recorder  # Pass the shared video recorder
+        )
+
+    def _handle_comp_area_gcp(self, args) -> bool:
+        """Handle competition area GCP detection mission"""
+        return mission_competition_area_gcp(
+            vehicle=self.vehicle,
+            altitude=args.altitude,
+            model_path=args.gcp_model,
+            confidence=args.gcp_confidence,
+            video_recorder=self.video_recorder
         )
 
 

@@ -1,8 +1,9 @@
-# missions/waypoint_bullseye.py - COMPLETE REWRITE v2
+# missions/waypoint_bullseye.py - UPDATED WITH ACTION PARAMETERS
 """
-Bullseye Detection with Collection and Middle Point Landing
+Bullseye Detection with Collection and Configurable Actions
 ---------------------------------------------------------
-Collects all bullseye detections during flight, then lands at the middle point.
+Collects all bullseye detections during flight, then executes configurable action at middle point.
+Supports: land, drop, deliver actions
 """
 
 import logging
@@ -18,14 +19,15 @@ from drone.navigation import (
     check_if_armed, disarm_vehicle, get_location, send_ned_velocity,
     get_distance_metres, get_location_metres
 )
+from drone.servo import open_claw
 from detection.bullseye_detector import BullseyeDetector
 from detection.camera import initialize_camera, capture_frame, close_camera
 
 def mission_waypoint_bullseye_detection(vehicle, altitude=6, model_path="models/best.pt",
                                       confidence=0.5, loops=1, land_on_detection=True,
-                                      video_recorder=None):
+                                      video_recorder=None, action='land'):
     """
-    Execute waypoint mission collecting all bullseye detections and landing at middle point.
+    Execute waypoint mission collecting all bullseye detections and performing specified action at middle point.
 
     Args:
         vehicle: The connected mavlink object
@@ -33,8 +35,9 @@ def mission_waypoint_bullseye_detection(vehicle, altitude=6, model_path="models/
         model_path: Path to YOLO model
         confidence: Detection confidence threshold
         loops: Number of times to repeat waypoint pattern
-        land_on_detection: Whether to land when bullseye is detected
+        land_on_detection: Whether to perform action when bullseye is detected (kept for backward compatibility)
         video_recorder: Existing video recorder to share camera (optional)
+        action: Action to perform at bullseye ('land', 'drop', 'deliver')
 
     Returns:
         True if mission completed successfully
@@ -44,9 +47,16 @@ def mission_waypoint_bullseye_detection(vehicle, altitude=6, model_path="models/
         return False
 
     try:
-        logging.info("=== BULLSEYE COLLECTION AND MIDDLE POINT LANDING MISSION ===")
+        logging.info("=== BULLSEYE COLLECTION AND CONFIGURABLE ACTION MISSION ===")
         logging.info(f"Flight altitude: {altitude}m")
         logging.info(f"Loops: {loops}")
+        logging.info(f"Action at bullseye: {action.upper()}")
+
+        # Validate action parameter
+        valid_actions = ['land', 'drop', 'deliver']
+        if action not in valid_actions:
+            logging.error(f"Invalid action '{action}'. Must be one of: {valid_actions}")
+            return False
 
         # Your specific waypoints
         waypoints = [
@@ -110,22 +120,22 @@ def mission_waypoint_bullseye_detection(vehicle, altitude=6, model_path="models/
             if middle_point:
                 logging.info(f"📍 Calculated middle detection point: {middle_point[0]:.7f}, {middle_point[1]:.7f}")
 
-                # Execute landing at middle point
-                success = execute_middle_point_landing(
-                    vehicle, middle_point, detector, video_recorder, altitude
+                # Execute action at middle point based on action parameter
+                success = execute_bullseye_action(
+                    vehicle, middle_point, detector, video_recorder, altitude, action
                 )
 
                 if success:
-                    logging.info("🎉 MISSION SUCCESS: Landed at middle of all detections!")
+                    logging.info(f"🎉 MISSION SUCCESS: {action.upper()} action completed at middle of all detections!")
                     return True
                 else:
-                    logging.error("❌ Middle point landing failed")
+                    logging.error(f"❌ {action.upper()} action failed")
             else:
                 logging.error("❌ Could not calculate middle point")
         else:
             logging.info("📍 No bullseyes detected during entire mission")
 
-        # Return to launch if no detections or landing failed
+        # Return to launch if no detections or action failed
         logging.info("\n🏠 RETURN TO LAUNCH")
         return_to_launch(vehicle)
         wait_for_landing(vehicle)
@@ -141,6 +151,213 @@ def mission_waypoint_bullseye_detection(vehicle, altitude=6, model_path="models/
             pass
         return False
 
+def execute_bullseye_action(vehicle, middle_point, detector, video_recorder, original_altitude, action):
+    """
+    Execute the specified action at the calculated middle point.
+
+    Args:
+        vehicle: The connected mavlink object
+        middle_point: (lat, lon, alt) of the middle detection point
+        detector: BullseyeDetector instance
+        video_recorder: Video recorder instance
+        original_altitude: Original flight altitude
+        action: Action to perform ('land', 'drop', 'deliver')
+
+    Returns:
+        True if action completed successfully
+    """
+    try:
+        logging.info(f"🎯 EXECUTING {action.upper()} ACTION SEQUENCE")
+
+        middle_lat, middle_lon, middle_alt = middle_point
+
+        # Step 1: Navigate to middle point (same for all actions)
+        logging.info(f"📍 Step 1: Flying to middle detection point {middle_lat:.7f}, {middle_lon:.7f}")
+
+        command_waypoint(vehicle, middle_lat, middle_lon, original_altitude)
+
+        # BLOCKING wait for arrival
+        if not wait_for_waypoint_blocking(vehicle, middle_lat, middle_lon, original_altitude, timeout=30, tolerance=1.5):
+            logging.error("❌ Failed to reach middle point")
+            return False
+
+        logging.info("✅ Reached middle detection point")
+
+        # Step 2: Verify bullseye at middle point (same for all actions)
+        frame = get_camera_frame(video_recorder)
+        if frame is not None:
+            bullseyes, _ = detector.detect_bullseyes_in_frame(frame)
+            if len(bullseyes) == 0:
+                logging.warning("⚠️ No bullseye at middle point - searching in small circle")
+
+                # Small circle search at middle point
+                found_location = search_in_circle(vehicle, middle_point, detector, video_recorder, radius=0.5)
+                if found_location:
+                    middle_point = found_location
+                    middle_lat, middle_lon, middle_alt = middle_point
+                    logging.info("🎯 Found bullseye in circle search")
+                else:
+                    logging.warning("⚠️ No bullseye in circle - proceeding with original middle point")
+
+        # Step 3: Climb for better detection view (same for all actions)
+        detection_altitude = original_altitude + 2
+        logging.info(f"📈 Step 3: Climbing to {detection_altitude}m for precision positioning")
+
+        command_waypoint(vehicle, middle_lat, middle_lon, detection_altitude)
+
+        if not wait_for_altitude_blocking(vehicle, detection_altitude, timeout=20, tolerance=0.3):
+            logging.warning("⚠️ Climb timeout - continuing anyway")
+
+        # Step 4: Center on bullseye with drone geometry compensation (same for all actions)
+        logging.info("🎯 Step 4: Final centering with drone geometry compensation")
+
+        if not center_on_bullseye_precise(vehicle, detector, video_recorder):
+            logging.warning("⚠️ Could not center perfectly - proceeding anyway")
+
+        # Step 5: Execute specific action based on action parameter
+        if action == 'land':
+            return execute_land_action(vehicle)
+        elif action == 'drop':
+            return execute_drop_action(vehicle)
+        elif action == 'deliver':
+            return execute_deliver_action(vehicle, middle_lat, middle_lon)
+        else:
+            logging.error(f"❌ Unknown action: {action}")
+            return False
+
+    except Exception as e:
+        logging.error(f"Error in bullseye action execution: {str(e)}")
+        return False
+
+def execute_land_action(vehicle):
+    """
+    Execute LAND action - land directly on the bullseye.
+
+    Returns:
+        True if landing completed successfully
+    """
+    try:
+        logging.info("🛬 EXECUTING LAND ACTION - Landing on bullseye")
+
+        if set_mode(vehicle, "LAND"):
+            logging.info("✅ Successfully switched to LAND mode")
+            monitor_landing(vehicle)
+            logging.info("🎯 LAND ACTION COMPLETED")
+            return True
+        else:
+            logging.error("❌ Failed to switch to LAND mode")
+            return False
+
+    except Exception as e:
+        logging.error(f"Error in land action: {str(e)}")
+        return False
+
+def execute_drop_action(vehicle):
+    """
+    Execute DROP action - drop payload at current altitude then RTL.
+
+    Returns:
+        True if drop action completed successfully
+    """
+    try:
+        logging.info("📦 EXECUTING DROP ACTION - Dropping payload at altitude")
+
+        # Step 1: Drop the payload using open_claw
+        logging.info("🤏 Step 1: Releasing payload (open_claw)")
+        open_claw_success = open_claw(vehicle)
+
+        if open_claw_success:
+            logging.info("✅ Payload released successfully")
+        else:
+            logging.warning("⚠️ Payload release may have failed - continuing")
+
+        # Step 2: Brief hover to ensure payload clears
+        logging.info("⏸️ Step 2: Brief hover to ensure payload clears")
+        time.sleep(3)
+
+        # Step 3: Return to launch
+        logging.info("🏠 Step 3: Returning to launch")
+        rtl_success = return_to_launch(vehicle)
+
+        if rtl_success:
+            wait_for_landing(vehicle)
+            logging.info("🎯 DROP ACTION COMPLETED")
+            return True
+        else:
+            logging.error("❌ RTL failed after drop")
+            return False
+
+    except Exception as e:
+        logging.error(f"Error in drop action: {str(e)}")
+        return False
+
+def execute_deliver_action(vehicle, target_lat, target_lon):
+    """
+    Execute DELIVER action - descend to 1-2m above ground, drop payload, then RTL.
+
+    Args:
+        vehicle: The connected mavlink object
+        target_lat: Target latitude for delivery
+        target_lon: Target longitude for delivery
+
+    Returns:
+        True if deliver action completed successfully
+    """
+    try:
+        logging.info("🚚 EXECUTING DELIVER ACTION - Descending for precision delivery")
+
+        # Step 1: Descend to delivery altitude (1.5m above ground)
+        delivery_altitude = 1.5
+        logging.info(f"⬇️ Step 1: Descending to delivery altitude ({delivery_altitude}m)")
+
+        command_waypoint(vehicle, target_lat, target_lon, delivery_altitude)
+
+        if not wait_for_altitude_blocking(vehicle, delivery_altitude, timeout=30, tolerance=0.2):
+            logging.warning("⚠️ Failed to reach exact delivery altitude - proceeding anyway")
+
+        # Step 2: Final hover for stability
+        logging.info("⏸️ Step 2: Stabilizing at delivery altitude")
+        time.sleep(2)
+
+        # Step 3: Drop the payload using open_claw
+        logging.info("🤏 Step 3: Releasing payload for precision delivery (open_claw)")
+        open_claw_success = open_claw(vehicle)
+
+        if open_claw_success:
+            logging.info("✅ Payload delivered successfully")
+        else:
+            logging.warning("⚠️ Payload delivery may have failed - continuing")
+
+        # Step 4: Brief hover to ensure payload clears and settles
+        logging.info("⏸️ Step 4: Brief hover to ensure safe payload delivery")
+        time.sleep(3)
+
+        # Step 5: Climb back up slightly before RTL for safety
+        safety_altitude = 5.0
+        logging.info(f"📈 Step 5: Climbing to safety altitude ({safety_altitude}m) before RTL")
+
+        command_waypoint(vehicle, target_lat, target_lon, safety_altitude)
+
+        if not wait_for_altitude_blocking(vehicle, safety_altitude, timeout=20, tolerance=0.3):
+            logging.warning("⚠️ Safety climb timeout - proceeding with RTL anyway")
+
+        # Step 6: Return to launch
+        logging.info("🏠 Step 6: Returning to launch")
+        rtl_success = return_to_launch(vehicle)
+
+        if rtl_success:
+            wait_for_landing(vehicle)
+            logging.info("🎯 DELIVER ACTION COMPLETED")
+            return True
+        else:
+            logging.error("❌ RTL failed after delivery")
+            return False
+
+    except Exception as e:
+        logging.error(f"Error in deliver action: {str(e)}")
+        return False
+
+# Keep all the existing helper functions unchanged
 def collect_detections_during_flight(vehicle, target_lat, target_lon, altitude, detector, video_recorder):
     """
     Collect ALL bullseye detections during flight to waypoint.
@@ -238,73 +455,6 @@ def calculate_middle_detection_point(all_detections):
         logging.error(f"Error calculating middle point: {str(e)}")
         return None
 
-def execute_middle_point_landing(vehicle, middle_point, detector, video_recorder, original_altitude):
-    """
-    Execute landing sequence at the calculated middle point.
-    """
-    try:
-        logging.info("🎯 EXECUTING MIDDLE POINT LANDING SEQUENCE")
-
-        middle_lat, middle_lon, middle_alt = middle_point
-
-        # Step 1: Navigate to middle point
-        logging.info(f"📍 Step 1: Flying to middle detection point {middle_lat:.7f}, {middle_lon:.7f}")
-
-        command_waypoint(vehicle, middle_lat, middle_lon, original_altitude)
-
-        # BLOCKING wait for arrival
-        if not wait_for_waypoint_blocking(vehicle, middle_lat, middle_lon, original_altitude, timeout=30, tolerance=1.5):
-            logging.error("❌ Failed to reach middle point")
-            return False
-
-        logging.info("✅ Reached middle detection point")
-
-        # Step 2: Verify bullseye at middle point
-        frame = get_camera_frame(video_recorder)
-        if frame is not None:
-            bullseyes, _ = detector.detect_bullseyes_in_frame(frame)
-            if len(bullseyes) == 0:
-                logging.warning("⚠️ No bullseye at middle point - searching in small circle")
-
-                # Small circle search at middle point
-                found_location = search_in_circle(vehicle, middle_point, detector, video_recorder, radius=0.5)
-                if found_location:
-                    middle_point = found_location
-                    middle_lat, middle_lon, middle_alt = middle_point
-                    logging.info("🎯 Found bullseye in circle search")
-                else:
-                    logging.warning("⚠️ No bullseye in circle - proceeding with original middle point")
-
-        # Step 3: Climb for better detection view
-        detection_altitude = original_altitude + 2
-        logging.info(f"📈 Step 3: Climbing to {detection_altitude}m for precision landing")
-
-        command_waypoint(vehicle, middle_lat, middle_lon, detection_altitude)
-
-        if not wait_for_altitude_blocking(vehicle, detection_altitude, timeout=20, tolerance=0.3):
-            logging.warning("⚠️ Climb timeout - continuing anyway")
-
-        # Step 4: Center on bullseye with drone geometry compensation
-        logging.info("🎯 Step 4: Final centering with drone geometry compensation")
-
-        if not center_on_bullseye_precise(vehicle, detector, video_recorder):
-            logging.warning("⚠️ Could not center perfectly - landing anyway")
-
-        # Step 5: Land
-        logging.info("⬇️ Step 5: Initiating landing at middle detection point")
-
-        if set_mode(vehicle, "LAND"):
-            logging.info("✅ Successfully switched to LAND mode")
-            monitor_landing(vehicle)
-            return True
-        else:
-            logging.error("❌ Failed to switch to LAND mode")
-            return False
-
-    except Exception as e:
-        logging.error(f"Error in middle point landing: {str(e)}")
-        return False
-
 def center_on_bullseye_precise(vehicle, detector, video_recorder, max_attempts=6):
     """
     Precise centering with drone geometry compensation (15mm camera offset).
@@ -361,7 +511,7 @@ def center_on_bullseye_precise(vehicle, detector, video_recorder, max_attempts=6
 
             # Check if well centered
             if offset_distance <= 12:  # Tight tolerance
-                logging.info("🎯 PERFECTLY CENTERED! Ready for landing")
+                logging.info("🎯 PERFECTLY CENTERED! Ready for action")
                 return True
 
             # Calculate correction with geometry compensation

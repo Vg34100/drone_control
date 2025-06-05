@@ -645,8 +645,10 @@ def wait_for_waypoint_optimized(vehicle, target_lat, target_lon, target_altitude
         consecutive_good = 0
         required_good = 3
         last_distance = None
-        check_interval = 1.0  # Check position every 1 second
+        check_interval = 1.0
         last_check = 0
+        last_altitude_correction = 0
+        altitude_correction_interval = 3.0  # Don't spam altitude corrections
 
         print(f"\nOptimized waypoint navigation...")
         print("Target: {:.7f}, {:.7f} at {:.1f}m".format(target_lat, target_lon, target_altitude))
@@ -668,19 +670,27 @@ def wait_for_waypoint_optimized(vehicle, target_lat, target_lon, target_altitude
                     distance = get_distance_metres(current_location, target_location)
                     bearing = calculate_bearing(current_lat, current_lon, target_lat, target_lon)
 
-                    # Check altitude and correct if needed
+                    # FIXED: Altitude correction that MAINTAINS horizontal target
                     altitude_error = target_altitude - current_alt
-                    if abs(altitude_error) > 0.8:
+                    if (abs(altitude_error) > 0.8 and
+                        current_time - last_altitude_correction > altitude_correction_interval):
+
                         logging.info(f"Altitude correction needed: {altitude_error:+.2f}m")
 
                         try:
+                            # CRITICAL FIX: Send command to ORIGINAL WAYPOINT with corrected altitude
+                            # This maintains horizontal movement while fixing altitude
                             vehicle.mav.set_position_target_global_int_send(
                                 0, vehicle.target_system, vehicle.target_component,
                                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                                0b0000111111111000,  # Only altitude
-                                int(current_lat * 1e7), int(current_lon * 1e7), target_altitude,
+                                0b0000111111111000,  # Position + altitude
+                                int(target_lat * 1e7),    # ← ORIGINAL TARGET, not current position!
+                                int(target_lon * 1e7),    # ← ORIGINAL TARGET, not current position!
+                                target_altitude,           # ← Correct altitude
                                 0, 0, 0, 0, 0, 0, 0, 0
                             )
+                            last_altitude_correction = current_time
+
                         except Exception as e:
                             logging.warning(f"Altitude correction failed: {str(e)}")
 
@@ -724,6 +734,7 @@ def wait_for_waypoint_optimized(vehicle, target_lat, target_lon, target_altitude
     except Exception as e:
         logging.error(f"Error during optimized waypoint wait: {str(e)}")
         return False
+
 
 def command_waypoint_clean(vehicle, target_lat, target_lon, altitude):
     """Send waypoint command with clean approach"""

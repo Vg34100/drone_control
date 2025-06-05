@@ -748,10 +748,16 @@ def command_waypoint_clean(vehicle, target_lat, target_lon, altitude):
         logging.error(f"Error sending waypoint: {str(e)}")
         return False
 
-def mission_diamond_precision_fixed(vehicle, altitude=5, loops=1):
+def mission_diamond_precision_fixed(vehicle, altitude=5, loops=1, mission_file=None):
     """
-    Diamond mission optimized for your specific setup.
+    Diamond mission optimized for your specific setup with mission file support.
     Fixes the message degradation issue.
+
+    Args:
+        vehicle: The connected mavlink object
+        altitude: Flight altitude in meters (overrides mission file altitudes if provided)
+        loops: Number of loops to repeat the waypoints
+        mission_file: Path to Mission Planner .mission file (optional)
     """
     if not vehicle:
         return False
@@ -762,14 +768,45 @@ def mission_diamond_precision_fixed(vehicle, altitude=5, loops=1):
         # Clean up any existing streams first
         clean_message_streams(vehicle)
 
-        # Your waypoints
-        diamond_waypoints = [
-            # (35.3481850, -119.1049075),  # West point
-            # (35.3481795, -119.1046386),  # East point
-            # Closer Positions
-            (35.3481866,	-119.1047372), #left
-            (35.3481888,	-119.1048713), #right
-        ] * loops
+        # Determine waypoints source
+        if mission_file:
+            logging.info(f"Loading waypoints from mission file: {mission_file}")
+
+            # Import mission parser
+            from missions.mission_parser import MissionParser
+
+            # Parse mission file
+            parser = MissionParser()
+            if not parser.parse_mission_file(mission_file):
+                logging.error("Failed to parse mission file")
+                return False
+
+            # Get simple waypoints (lat, lon pairs)
+            mission_waypoints = parser.get_simple_waypoints()
+
+            if not mission_waypoints:
+                logging.error("No navigation waypoints found in mission file")
+                return False
+
+            # Use mission waypoints, repeated by loops
+            diamond_waypoints = mission_waypoints * loops
+
+            logging.info(f"Loaded {len(mission_waypoints)} waypoints from mission file")
+            logging.info(f"Total waypoints with {loops} loops: {len(diamond_waypoints)}")
+
+            # If altitude parameter provided, it overrides mission file altitudes
+            # (Mission file altitudes are ignored when using simple waypoints)
+            logging.info(f"Using altitude: {altitude}m (overrides mission file altitudes)")
+
+        else:
+            logging.info("Using default hardcoded waypoints")
+            # Your original waypoints
+            diamond_waypoints = [
+                (35.3481866, -119.1047372),  # left
+                (35.3481888, -119.1048713),  # right
+            ] * loops
+
+        logging.info(f"Mission will visit {len(diamond_waypoints)} waypoints at {altitude}m altitude")
 
         # Pre-flight checks and takeoff (using your existing functions)
         from drone.navigation import run_preflight_checks, set_mode, arm_and_takeoff, return_to_launch, check_if_armed, disarm_vehicle

@@ -30,6 +30,7 @@ from detection.video_recorder import create_video_recorder
 from detection.bullseye_detector import test_bullseye_detection
 from missions.waypoint_bullseye import mission_waypoint_bullseye_detection
 from missions.waypoint_gcp import mission_waypoint_gcp_detection
+from missions.mission_parser import test_mission_parser
 
 class MissionConfig:
     """Configuration class for mission parameters and shortcuts"""
@@ -65,6 +66,8 @@ class MissionConfig:
         "safety-check": ["safety", "safe"],
         "orientation-check": ["orient", "orientation"],
         "position-hold-check": ["pos-hold", "position"],
+
+        "test-mission-parser": ["parser", "test-parser", "mission-test", "mp"],
 
         "test-waypoint-bullseye": ["waypoint-bullseye", "wb", "bullseye-waypoint"],
 
@@ -127,6 +130,8 @@ class DroneController:
             # Video Tests
             "test-bullseye-video": self._handle_test_bullseye_video,
             "test-gcp-yolo": self._handle_test_gcp_yolo,
+
+            "test-mission-parser": self._handle_test_mission_parser,
 
             "test-waypoint-bullseye": self._handle_waypoint_bullseye,
             "test-waypoint-gcp": self._handle_waypoint_gcp,
@@ -212,6 +217,9 @@ class DroneController:
         parser.add_argument("--gcp-confidence", type=float, default=0.5,
                           help="Confidence threshold for GCP detection (default: 0.5)")
 
+        parser.add_argument("--mission-file", type=str,
+                          help="Path to Mission Planner .mission file")
+
         return parser
 
     def _get_help_epilog(self) -> str:
@@ -243,6 +251,10 @@ class DroneController:
         lines.append("  python main.py wgcp --altitude 8 --loops 1    # waypoint GCP mission")
         lines.append("  python main.py test-waypoint-gcp --gcp-model best-gcp.pt --confidence 0.7")
 
+        lines.append("  python main.py test-parser --source test.mission  # test mission parser")
+        lines.append("  python main.py diamond --mission-file waypoints.mission --altitude 8  # use mission file with altitude override")
+
+
         return "\n".join(lines)
 
     def connect_if_needed(self, mission: str, connection_string: str) -> bool:
@@ -251,6 +263,7 @@ class DroneController:
         primary_mission = self.config.ALIAS_TO_MISSION.get(mission, mission)
 
         missions_without_vehicle = {
+            "test-mission-parser",
             "test-camera",
             "test-bullseye-video",
             "test-video-recording",
@@ -399,7 +412,8 @@ class DroneController:
         return test_incremental_takeoff(self.vehicle, args.altitude, args.increment)
 
     def _handle_diamond_waypoints(self, args) -> bool:
-        return mission_diamond_precision_fixed(self.vehicle, args.altitude, args.loops)
+        mission_file = getattr(args, 'mission_file', None) or getattr(args, 'source', None)
+        return mission_diamond_precision_fixed(self.vehicle, args.altitude, args.loops, mission_file)
 
     def _handle_waypoint(self, args) -> bool:
         return mission_waypoint(self.vehicle, args.altitude)
@@ -510,6 +524,15 @@ class DroneController:
             video_recorder=self.video_recorder  # Pass the shared video recorder
         )
 
+    def _handle_test_mission_parser(self, args) -> bool:
+        """Handle mission parser test"""
+        mission_file = getattr(args, 'mission_file', None) or getattr(args, 'source', None)
+
+        if not mission_file:
+            logging.error("Mission file required for parser test. Use --mission-file or --source parameter")
+            return False
+
+        return test_mission_parser(mission_file)
 
     def _handle_preflight_all(self, args) -> bool:
         """Run comprehensive preflight checks"""

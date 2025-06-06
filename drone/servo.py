@@ -93,7 +93,32 @@ def operate_package_release(vehicle, servo_number=9):
         logging.error(f"Error during package release: {str(e)}")
         return False
 
-def operate_claw(vehicle, servo_number=10, open_position=2000, closed_position=1000):
+def open_claw(vehicle, servo_numbers=(14, 9), position=(2000, 1000, 1500), sleep_time=0.5):
+    set_servo_position(vehicle, servo_numbers[0], position[0])
+    set_servo_position(vehicle, servo_numbers[1], position[1])
+    time.sleep(sleep_time)
+    idle_claw(vehicle, servo_numbers)
+
+def close_claw(vehicle, servo_numbers=(14, 9), position=(1000, 2000, 1500), sleep_time=0.5):
+    set_servo_position(vehicle, servo_numbers[0], position[0])
+    set_servo_position(vehicle, servo_numbers[1], position[1])
+    time.sleep(sleep_time)
+    idle_claw(vehicle, servo_numbers)
+
+def idle_claw(vehicle, servo_numbers=(14, 9), position=1500, sleep_time=0):
+    change_claw(vehicle, servo_numbers, position)
+
+def change_claw(vehicle, servo_numbers=(14, 9), position=1500, sleep_time=0.5):
+    logging.info("Moving claw")
+    if not set_servo_position(vehicle, servo_numbers[0], position):
+        logging.error("Failed to open claw")
+        return False
+    if not set_servo_position(vehicle, servo_numbers[1], position):
+        logging.error("Failed to open claw")
+        return False
+    time.sleep(sleep_time)
+
+def operate_claw(vehicle, servo_numbers=(14, 9), open_position=2000, closed_position=1000):
     """
     Operate the claw for package delivery.
 
@@ -107,16 +132,8 @@ def operate_claw(vehicle, servo_number=10, open_position=2000, closed_position=1
         True if successful, False otherwise
     """
     try:
-        logging.info("Opening claw")
-        if not set_servo_position(vehicle, servo_number, open_position):
-            logging.error("Failed to open claw")
-            return False
-        time.sleep(2)
-
-        logging.info("Closing claw")
-        if not set_servo_position(vehicle, servo_number, closed_position):
-            logging.error("Failed to close claw")
-            return False
+        open_claw(vehicle, servo_numbers)
+        close_claw(vehicle, servo_numbers)
 
         logging.info("Claw operation completed")
         return True

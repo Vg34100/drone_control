@@ -18,7 +18,7 @@ from pymavlink import mavutil
 from detection.gcp_yolo_detector import test_gcp_yolo_detection
 from drone.connection import connect_vehicle, close_vehicle
 from drone.navigation import set_mode, test_motors
-from drone.servo import test_servo_simple
+from drone.servo import close_claw, idle_claw, open_claw, test_servo_simple
 from missions.test_missions import (
     test_connection, test_arm, test_takeoff, test_camera,
     test_motor, test_incremental_takeoff, monitor_altitude_realtime
@@ -71,6 +71,9 @@ class MissionConfig:
         # GCP Detection missions
         "test-gcp-yolo": ["gcp", "gcp-yolo", "test-gcp", "gcp-test"],
         "test-waypoint-gcp": ["waypoint-gcp", "wgcp", "gcp-waypoint"],
+
+        "test-claw": ["claw"],
+        "close-claw": ["close"],
     }
 
     # Reverse mapping for quick lookup
@@ -131,8 +134,13 @@ class DroneController:
             "test-waypoint-bullseye": self._handle_waypoint_bullseye,
             "test-waypoint-gcp": self._handle_waypoint_gcp,
 
+            "test-claw": self._test_claw,
+            "close-claw": self._close_claw,
+
 
         }
+
+
 
     def setup_logging(self):
         """Configure logging"""
@@ -370,6 +378,16 @@ class DroneController:
 
     def _handle_test_servo(self, args) -> bool:
         return test_servo_simple(self.vehicle)
+
+    def _test_claw(self, args) -> bool:
+        open_claw(self.vehicle)
+        close_claw(self.vehicle)
+        idle_claw(self.vehicle)
+
+    def _close_claw(self, args) -> bool:
+        close_claw(self.vehicle)
+        idle_claw(self.vehicle)
+
 
     def _handle_test_bullseye_video(self, args) -> bool:
         """Handle bullseye detection test"""

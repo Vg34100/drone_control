@@ -1,4 +1,3 @@
-# missions/waypoint_comp_area_gcp.py - NEW FILE
 """
 Competition Area GCP Detection Mission
 ------------------------------------
@@ -12,6 +11,7 @@ import json
 import cv2
 import math
 import os
+import signal
 from datetime import datetime
 from pymavlink import mavutil
 
@@ -22,6 +22,9 @@ from drone.navigation import (
     get_distance_metres, get_location_metres
 )
 from detection.camera import initialize_camera, capture_frame, close_camera
+
+# Global variable for mission data (needed for signal handler)
+mission_data = None
 
 # Try to import YOLO, fallback if not available
 try:
@@ -257,6 +260,45 @@ def mission_competition_area_gcp(vehicle, altitude=8, model_path="models/best-gc
         logging.error("No vehicle connection")
         return False
 
+    # Global collections for signal handler access
+    global mission_data
+    mission_data = {
+        'all_gcp_detections': [],
+        'numbered_markers': [],
+        'output_dir': None,
+        'boundary_corners': [],
+        'mission_start_time': time.time()
+    }
+
+    def signal_handler(signum, frame):
+        """Handle Ctrl+C interruption and save data"""
+        logging.warning("\n🛑 Mission interrupted by user (Ctrl+C)")
+        logging.info("💾 Saving collected data before exit...")
+
+        try:
+            if mission_data['output_dir'] and mission_data['all_gcp_detections']:
+                # Save whatever data we have collected
+                save_all_numbered_markers(mission_data['all_gcp_detections'], mission_data['output_dir'])
+                save_mission_summary(mission_data['all_gcp_detections'], mission_data['boundary_corners'], mission_data['output_dir'])
+                logging.info(f"📂 Partial results saved to: {mission_data['output_dir']}")
+
+            # Attempt emergency RTL
+            if vehicle:
+                logging.info("🏠 Attempting emergency return to launch...")
+                try:
+                    return_to_launch(vehicle)
+                except:
+                    logging.error("Emergency RTL failed")
+        except Exception as save_error:
+            logging.error(f"Error saving data during interruption: {str(save_error)}")
+
+        logging.info("Mission terminated by user")
+        exit(1)
+
+    # Register signal handler for graceful shutdown
+    import signal
+    signal.signal(signal.SIGINT, signal_handler)
+
     try:
         logging.info("=== COMPETITION AREA GCP DETECTION MISSION ===")
         logging.info(f"Flight altitude: {altitude}m")
@@ -271,6 +313,8 @@ def mission_competition_area_gcp(vehicle, altitude=8, model_path="models/best-gc
             (35.3482402, -119.1046970),  # Northeast
         ]
 
+        mission_data['boundary_corners'] = boundary_corners
+
         logging.info("Boundary corners:")
         for i, (lat, lon) in enumerate(boundary_corners):
             logging.info(f"  Corner {i+1}: {lat:.7f}, {lon:.7f}")
@@ -283,15 +327,13 @@ def mission_competition_area_gcp(vehicle, altitude=8, model_path="models/best-gc
             imgsz=160
         )
 
-        # Initialize collections
-        all_gcp_detections = []
-        numbered_markers = []
-        potential_gcps = []
-
         # Create output directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = f"results/competition_area_gcp_{timestamp}"
         os.makedirs(output_dir, exist_ok=True)
+        mission_data['output_dir'] = output_dir
+
+        logging.info(f"📂 Results will be saved to: {output_dir}")
 
         # Run pre-flight checks
         checks_passed, failure_reason = run_preflight_checks(vehicle)
@@ -311,41 +353,43 @@ def mission_competition_area_gcp(vehicle, altitude=8, model_path="models/best-gc
         # PHASE 1: Initial Reconnaissance
         logging.info("\n🔍 PHASE 1: INITIAL RECONNAISSANCE")
         reconnaissance_detections = perform_boundary_reconnaissance(
-            vehicle, boundary_corners, altitude, detector, video_recorder
+            vehicle, boundary_corners, altitude, detector, video_recorder, output_dir
         )
 
         if reconnaissance_detections:
             logging.info(f"📊 Reconnaissance found {len(reconnaissance_detections)} potential GCP areas")
-            all_gcp_detections.extend(reconnaissance_detections)
+            mission_data['all_gcp_detections'].extend(reconnaissance_detections)
         else:
             logging.info("📊 No GCPs detected during reconnaissance")
 
         # PHASE 2: Systematic Coverage
         logging.info("\n🔍 PHASE 2: SYSTEMATIC COVERAGE")
         coverage_detections = perform_systematic_coverage(
-            vehicle, boundary_corners, altitude, detector, video_recorder
+            vehicle, boundary_corners, altitude, detector, video_recorder, output_dir
         )
 
         if coverage_detections:
             logging.info(f"📊 Systematic coverage found {len(coverage_detections)} additional detections")
-            all_gcp_detections.extend(coverage_detections)
+            mission_data['all_gcp_detections'].extend(coverage_detections)
 
         # PHASE 3: Adaptive Refinement
         logging.info("\n🔍 PHASE 3: ADAPTIVE REFINEMENT")
-        if all_gcp_detections:
+        if mission_data['all_gcp_detections']:
             refinement_detections = perform_adaptive_refinement(
-                vehicle, all_gcp_detections, altitude, detector, video_recorder, output_dir
+                vehicle, mission_data['all_gcp_detections'], altitude, detector, video_recorder, output_dir
             )
 
+            mission_data['all_gcp_detections'].extend(refinement_detections)
+
             # Process and save all numbered markers found
-            numbered_count = save_all_numbered_markers(all_gcp_detections + refinement_detections, output_dir)
+            numbered_count = save_all_numbered_markers(mission_data['all_gcp_detections'], output_dir)
 
             logging.info(f"📊 Final results: {numbered_count} numbered markers saved")
         else:
             logging.info("📊 No GCP detections to refine")
 
         # Save mission summary
-        save_mission_summary(all_gcp_detections, boundary_corners, output_dir)
+        save_mission_summary(mission_data['all_gcp_detections'], boundary_corners, output_dir)
 
         # Return to launch
         logging.info("\n🏠 RETURN TO LAUNCH")
@@ -356,16 +400,26 @@ def mission_competition_area_gcp(vehicle, altitude=8, model_path="models/best-gc
         logging.info(f"📂 Results saved to: {output_dir}")
         return True
 
+    except KeyboardInterrupt:
+        # This should be caught by signal handler, but just in case
+        logging.warning("Mission interrupted")
+        return False
     except Exception as e:
         logging.error(f"Critical error during competition area GCP mission: {str(e)}")
         try:
+            # Save whatever data we have before emergency RTL
+            if mission_data['output_dir'] and mission_data['all_gcp_detections']:
+                save_all_numbered_markers(mission_data['all_gcp_detections'], mission_data['output_dir'])
+                save_mission_summary(mission_data['all_gcp_detections'], mission_data['boundary_corners'], mission_data['output_dir'])
+                logging.info(f"📂 Partial results saved to: {mission_data['output_dir']}")
+
             logging.info("Attempting emergency return to launch")
             return_to_launch(vehicle)
         except:
             pass
         return False
 
-def perform_boundary_reconnaissance(vehicle, boundary_corners, altitude, detector, video_recorder):
+def perform_boundary_reconnaissance(vehicle, boundary_corners, altitude, detector, video_recorder, output_dir):
     """
     Phase 1: Quick reconnaissance flight around boundary perimeter
     """
@@ -383,7 +437,7 @@ def perform_boundary_reconnaissance(vehicle, boundary_corners, altitude, detecto
 
             # Wait for arrival while detecting
             corner_detections = monitor_flight_with_detection(
-                vehicle, (corner_lat, corner_lon), altitude, detector, video_recorder, timeout=45
+                vehicle, (corner_lat, corner_lon), altitude, detector, video_recorder, output_dir, timeout=45
             )
 
             detections.extend(corner_detections)
@@ -399,7 +453,7 @@ def perform_boundary_reconnaissance(vehicle, boundary_corners, altitude, detecto
         logging.error(f"Error during boundary reconnaissance: {str(e)}")
         return []
 
-def perform_systematic_coverage(vehicle, boundary_corners, altitude, detector, video_recorder):
+def perform_systematic_coverage(vehicle, boundary_corners, altitude, detector, video_recorder, output_dir):
     """
     Phase 2: Systematic lawnmower pattern coverage within boundary
     """
@@ -433,7 +487,7 @@ def perform_systematic_coverage(vehicle, boundary_corners, altitude, detector, v
 
             # Monitor flight with detection
             wp_detections = monitor_flight_with_detection(
-                vehicle, (wp_lat, wp_lon), altitude, detector, video_recorder, timeout=30
+                vehicle, (wp_lat, wp_lon), altitude, detector, video_recorder, output_dir, timeout=30
             )
 
             detections.extend(wp_detections)
@@ -522,9 +576,9 @@ def generate_lawnmower_pattern(min_lat, max_lat, min_lon, max_lon, spacing):
         logging.error(f"Error generating lawnmower pattern: {str(e)}")
         return []
 
-def monitor_flight_with_detection(vehicle, target_location, altitude, detector, video_recorder, timeout=30):
+def monitor_flight_with_detection(vehicle, target_location, altitude, detector, video_recorder, output_dir, timeout=30):
     """
-    Monitor flight to waypoint while continuously detecting GCPs
+    Monitor flight to waypoint while continuously detecting GCPs and saving numbered markers
     """
     try:
         detections = []
@@ -563,6 +617,10 @@ def monitor_flight_with_detection(vehicle, target_location, altitude, detector, 
                             detections.append(detection_dict)
 
                             logging.info(f"🎯 {class_name}: GPS {current_location[0]:.7f}, {current_location[1]:.7f}, Conf: {confidence:.3f}")
+
+                            # SAVE NUMBERED MARKERS IMMEDIATELY with cropped images
+                            if class_name == 'marker-numbered':
+                                save_numbered_marker_immediate(detection_dict, frame, output_dir)
 
                     # Check if reached waypoint
                     distance = get_distance_metres(current_location, target_pos)
@@ -610,12 +668,12 @@ def perform_detailed_analysis(vehicle, location, detector, video_recorder, outpu
 
                 detections.append(detection_dict)
 
-                # Save numbered markers with cropped images
+                # Save numbered markers immediately with cropped images
                 if class_name == 'marker-numbered':
-                    save_numbered_marker_with_image(detection_dict, frame, output_dir)
+                    save_numbered_marker_immediate(detection_dict, frame, output_dir)
 
         # Small circle search for better coverage
-        circle_detections = perform_micro_circle_search(vehicle, location, detector, video_recorder, radius=0.5)
+        circle_detections = perform_micro_circle_search(vehicle, location, detector, video_recorder, output_dir, radius=0.5)
         detections.extend(circle_detections)
 
         return detections
@@ -754,53 +812,105 @@ def save_numbered_marker_with_image(detection_dict, frame, output_dir):
 
 def save_all_numbered_markers(all_detections, output_dir):
     """
-    Save all numbered markers found during mission to JSON file
+    Save comprehensive JSON summary of all numbered markers found during mission
     """
     try:
-        numbered_markers = []
+        # Filter for numbered markers only
+        numbered_detections = [d for d in all_detections if d.get('class') == 'marker-numbered']
 
-        for detection in all_detections:
-            if detection.get('class') == 'marker-numbered':
-                gps_location = detection.get('gps_location', (0, 0, 0))
+        if not numbered_detections:
+            logging.info("No numbered markers found to save")
+            return 0
 
-                marker_data = {
-                    'id': len(numbered_markers) + 1,
-                    'gps_location': {
-                        'latitude': gps_location[0],
-                        'longitude': gps_location[1],
-                        'altitude': gps_location[2]
-                    },
-                    'detection': {
-                        'camera_center': detection.get('camera_center', (0, 0)),
-                        'bbox': detection.get('bbox', (0, 0, 0, 0)),
-                        'confidence': detection.get('confidence', 0.0)
-                    },
+        # Create comprehensive results structure
+        numbered_markers_summary = []
+
+        for i, detection in enumerate(numbered_detections, 1):
+            gps_location = detection.get('gps_location', (0, 0, 0))
+
+            marker_entry = {
+                'detection_order': i,
+                'gps_location': {
+                    'latitude': gps_location[0],
+                    'longitude': gps_location[1],
+                    'altitude': gps_location[2]
+                },
+                'detection_details': {
+                    'confidence': detection.get('confidence', 0.0),
+                    'camera_center': detection.get('camera_center', (0, 0)),
+                    'bbox': detection.get('bbox', (0, 0, 0, 0)),
                     'timestamp': detection.get('timestamp', time.time()),
-                    'detection_phase': 'reconnaissance' if not detection.get('detailed_analysis') and not detection.get('circle_search') else
-                                    'detailed_analysis' if detection.get('detailed_analysis') else 'circle_search'
+                    'timestamp_str': datetime.fromtimestamp(detection.get('timestamp', time.time())).isoformat()
+                },
+                'mission_context': {
+                    'detection_phase': 'detailed_analysis' if detection.get('detailed_analysis') else
+                                    'circle_search' if detection.get('circle_search') else 'systematic_coverage',
+                    'detailed_analysis': detection.get('detailed_analysis', False),
+                    'circle_search': detection.get('circle_search', False)
                 }
+            }
 
-                numbered_markers.append(marker_data)
+            numbered_markers_summary.append(marker_entry)
 
-        # Save to JSON
+        # Create final JSON structure
+        final_results = {
+            'mission_info': {
+                'mission_type': 'competition_area_gcp',
+                'mission_timestamp': datetime.now().isoformat(),
+                'total_numbered_markers_found': len(numbered_detections),
+                'mission_duration_seconds': time.time() - (numbered_detections[0].get('timestamp', time.time()) if numbered_detections else time.time())
+            },
+            'summary_statistics': {
+                'total_detections': len(numbered_detections),
+                'detections_by_phase': {
+                    'systematic_coverage': len([d for d in numbered_detections if not d.get('detailed_analysis') and not d.get('circle_search')]),
+                    'detailed_analysis': len([d for d in numbered_detections if d.get('detailed_analysis')]),
+                    'circle_search': len([d for d in numbered_detections if d.get('circle_search')])
+                },
+                'average_confidence': sum(d.get('confidence', 0) for d in numbered_detections) / len(numbered_detections),
+                'confidence_range': {
+                    'min': min(d.get('confidence', 0) for d in numbered_detections),
+                    'max': max(d.get('confidence', 0) for d in numbered_detections)
+                }
+            },
+            'numbered_markers': numbered_markers_summary
+        }
+
+        # Save comprehensive results
         json_filename = "numbered_markers_competition_results.json"
         json_path = os.path.join(output_dir, json_filename)
 
-        results = {
-            'mission_type': 'competition_area_gcp',
-            'mission_timestamp': datetime.now().isoformat(),
-            'total_numbered_markers_found': len(numbered_markers),
-            'numbered_markers': numbered_markers
-        }
-
         with open(json_path, 'w') as f:
-            json.dump(results, f, indent=2)
+            json.dump(final_results, f, indent=2)
 
-        logging.info(f"💾 Saved {len(numbered_markers)} numbered markers to {json_filename}")
-        return len(numbered_markers)
+        # Also save a simple coordinates-only file for quick reference
+        simple_coords = [
+            {
+                'id': i,
+                'latitude': marker['gps_location']['latitude'],
+                'longitude': marker['gps_location']['longitude'],
+                'confidence': marker['detection_details']['confidence']
+            }
+            for i, marker in enumerate(numbered_markers_summary, 1)
+        ]
+
+        simple_filename = "numbered_markers_coordinates_only.json"
+        simple_path = os.path.join(output_dir, simple_filename)
+
+        with open(simple_path, 'w') as f:
+            json.dump({
+                'total_markers': len(simple_coords),
+                'coordinates': simple_coords
+            }, f, indent=2)
+
+        logging.info(f"💾 Saved {len(numbered_detections)} numbered markers to:")
+        logging.info(f"  📄 Comprehensive: {json_filename}")
+        logging.info(f"  📄 Simple: {simple_filename}")
+
+        return len(numbered_detections)
 
     except Exception as e:
-        logging.error(f"Error saving numbered markers: {str(e)}")
+        logging.error(f"Error saving numbered markers summary: {str(e)}")
         return 0
 
 def save_mission_summary(all_detections, boundary_corners, output_dir):
@@ -930,3 +1040,175 @@ def wait_for_landing(vehicle):
             time.sleep(2)
     except:
         pass
+
+def perform_micro_circle_search(vehicle, center_location, detector, video_recorder, output_dir, radius=0.5, points=4):
+    """
+    Small circle search around a detection point
+    """
+    try:
+        logging.info(f"🔄 Micro circle search: {radius}m radius")
+
+        detections = []
+        center_lat, center_lon, center_alt = center_location
+
+        for i in range(points):
+            angle = (i * 360 / points) * math.pi / 180
+
+            north_offset = radius * math.cos(angle)
+            east_offset = radius * math.sin(angle)
+
+            search_location = get_location_metres(center_location, north_offset, east_offset)
+            search_lat, search_lon, search_alt = search_location
+
+            # Move to circle point
+            command_waypoint(vehicle, search_lat, search_lon, center_alt)
+            time.sleep(1.5)  # Brief pause for movement
+
+            # Check for detections
+            frame = get_camera_frame(video_recorder)
+            if frame is not None:
+                gcp_detections, _ = detector.detect_gcp_markers_in_frame(frame)
+
+                if gcp_detections:
+                    current_location = get_location(vehicle)
+                    for detection_data in gcp_detections:
+                        class_name, center_x, center_y, bbox, confidence = detection_data
+
+                        detection_dict = {
+                            'class': class_name,
+                            'gps_location': current_location or search_location,
+                            'camera_center': (center_x, center_y),
+                            'bbox': bbox,
+                            'confidence': confidence,
+                            'timestamp': time.time(),
+                            'circle_search': True
+                        }
+
+                        detections.append(detection_dict)
+
+                        # Save numbered markers immediately with cropped images
+                        if class_name == 'marker-numbered':
+                            save_numbered_marker_immediate(detection_dict, frame, output_dir)
+
+        # Return to center
+        command_waypoint(vehicle, center_lat, center_lon, center_alt)
+        time.sleep(1)
+
+        return detections
+
+    except Exception as e:
+        logging.error(f"Error during micro circle search: {str(e)}")
+        return []
+
+def save_numbered_marker_immediate(detection_dict, frame, output_dir):
+    """
+    Immediately save numbered marker with cropped image and metadata
+    """
+    try:
+        # Generate unique timestamp and ID
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+        # Count existing numbered marker files to get next ID
+        existing_files = [f for f in os.listdir(output_dir) if f.startswith('numbered_marker_') and f.endswith('.jpg')]
+        marker_id = len(existing_files) + 1
+
+        # Validate detection data
+        if 'bbox' not in detection_dict or 'gps_location' not in detection_dict:
+            logging.error("Invalid detection data for saving numbered marker")
+            return False
+
+        # Extract crop coordinates with validation
+        x1, y1, x2, y2 = detection_dict['bbox']
+        h, w = frame.shape[:2]
+
+        # Validate and fix bbox if needed
+        if x1 < 0 or y1 < 0 or x2 > w or y2 > h or x1 >= x2 or y1 >= y2:
+            logging.warning(f"Invalid bbox {detection_dict['bbox']}, using center crop fallback")
+            center_x, center_y = detection_dict.get('camera_center', (w//2, h//2))
+            crop_size = 50
+            x1 = max(0, center_x - crop_size)
+            y1 = max(0, center_y - crop_size)
+            x2 = min(w, center_x + crop_size)
+            y2 = min(h, center_y + crop_size)
+
+        # Add padding to crop
+        padding = 30  # Increased padding for better context
+        x1_crop = max(0, x1 - padding)
+        y1_crop = max(0, y1 - padding)
+        x2_crop = min(w, x2 + padding)
+        y2_crop = min(h, y2 + padding)
+
+        # Extract crop
+        cropped_image = frame[y1_crop:y2_crop, x1_crop:x2_crop]
+
+        if cropped_image.size == 0:
+            logging.error("Cropped image is empty, using full frame")
+            cropped_image = frame
+
+        # Save cropped image
+        crop_filename = f"numbered_marker_{marker_id:03d}_{timestamp}.jpg"
+        crop_path = os.path.join(output_dir, crop_filename)
+
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Save image with high quality
+        success = cv2.imwrite(crop_path, cropped_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+        if not success:
+            logging.error(f"Failed to save cropped image: {crop_filename}")
+            return False
+
+        # Create metadata file alongside image
+        metadata_filename = f"numbered_marker_{marker_id:03d}_{timestamp}.json"
+        metadata_path = os.path.join(output_dir, metadata_filename)
+
+        gps_location = detection_dict['gps_location']
+        marker_metadata = {
+            'marker_id': marker_id,
+            'timestamp': detection_dict.get('timestamp', time.time()),
+            'timestamp_str': datetime.fromtimestamp(detection_dict.get('timestamp', time.time())).isoformat(),
+            'gps_location': {
+                'latitude': gps_location[0],
+                'longitude': gps_location[1],
+                'altitude': gps_location[2]
+            },
+            'detection_info': {
+                'confidence': detection_dict.get('confidence', 0.0),
+                'camera_center': detection_dict.get('camera_center', (0, 0)),
+                'bbox_original': detection_dict.get('bbox', (0, 0, 0, 0)),
+                'bbox_cropped': (x1_crop, y1_crop, x2_crop, y2_crop)
+            },
+            'image_files': {
+                'cropped_image': crop_filename,
+                'image_dimensions': {
+                    'width': cropped_image.shape[1],
+                    'height': cropped_image.shape[0]
+                }
+            },
+            'detection_context': {
+                'detailed_analysis': detection_dict.get('detailed_analysis', False),
+                'circle_search': detection_dict.get('circle_search', False),
+                'phase': 'detailed_analysis' if detection_dict.get('detailed_analysis') else
+                        'circle_search' if detection_dict.get('circle_search') else 'reconnaissance'
+            }
+        }
+
+        # Save metadata
+        with open(metadata_path, 'w') as f:
+            json.dump(marker_metadata, f, indent=2)
+
+        logging.info(f"💾 Saved numbered marker #{marker_id}: {crop_filename}")
+        logging.info(f"📍 GPS: {gps_location[0]:.7f}, {gps_location[1]:.7f} | Conf: {detection_dict.get('confidence', 0.0):.3f}")
+
+        return True
+
+    except Exception as e:
+        logging.error(f"Error saving numbered marker: {str(e)}")
+        return False
+
+def save_numbered_marker_with_image(detection_dict, frame, output_dir):
+    """
+    Legacy function name - redirects to immediate save function
+    """
+    return save_numbered_marker_immediate(detection_dict, frame, output_dir)# missions/waypoint_comp_area_gcp.py - NEW FILE

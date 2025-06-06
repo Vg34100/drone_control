@@ -307,10 +307,16 @@ def mission_competition_area_gcp(vehicle, altitude=8, model_path="models/best-gc
 
         # Define the 4-corner boundary area (your test area)
         boundary_corners = [
-            (35.3482380, -119.1051073),  # Northwest
-            (35.3481549, -119.1051114),  # Southwest
-            (35.3481462, -119.1046983),  # Southeast
-            (35.3482402, -119.1046970),  # Northeast
+            # (35.3482380, -119.1051073),  # Northwest
+            # (35.3481549, -119.1051114),  # Southwest
+            # (35.3481462, -119.1046983),  # Southeast
+            # (35.3482402, -119.1046970),  # Northeast
+
+
+(35.3482337,    -119.1050604)
+(35.3481571,    -119.1050617)
+(35.3481582,    -119.1047727)
+(35.3482369,    -119.1047741)
         ]
 
         mission_data['boundary_corners'] = boundary_corners

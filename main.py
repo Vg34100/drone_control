@@ -212,6 +212,19 @@ class DroneController:
         parser.add_argument("--gcp-confidence", type=float, default=0.5,
                           help="Confidence threshold for GCP detection (default: 0.5)")
 
+        # NEW: Action parameters for waypoint bullseye mission
+        action_group = parser.add_mutually_exclusive_group()
+        action_group.add_argument("--land", action="store_const", dest="action", const="land",
+                                help="Land on bullseye when detected (default behavior)")
+        action_group.add_argument("--drop", action="store_const", dest="action", const="drop",
+                                help="Drop payload at altitude when bullseye detected, then RTL")
+        action_group.add_argument("--deliver", action="store_const", dest="action", const="deliver",
+                                help="Descend to 1-2m above bullseye, drop payload, then RTL")
+
+        # Set default action if none specified
+        parser.set_defaults(action="land")
+
+
         return parser
 
     def _get_help_epilog(self) -> str:
@@ -474,7 +487,8 @@ class DroneController:
             confidence=getattr(args, 'confidence', 0.5),
             loops=args.loops,
             land_on_detection=True,
-            video_recorder=self.video_recorder  # Pass the shared video recorder
+            video_recorder=self.video_recorder,  # Pass the shared video recorder
+            action=args.action
         )
 
     def _handle_test_gcp_yolo(self, args) -> bool:

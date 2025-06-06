@@ -93,11 +93,17 @@ def operate_package_release(vehicle, servo_number=9):
         logging.error(f"Error during package release: {str(e)}")
         return False
 
-def open_claw(vehicle, servo_numbers=(14, 9), position=2000, sleep_time=0.5):
-    change_claw(vehicle, servo_numbers, position)
+def open_claw(vehicle, servo_numbers=(14, 9), position=(2000, 1000, 1500), sleep_time=0.5):
+    set_servo_position(vehicle, servo_numbers[0], position[0])
+    set_servo_position(vehicle, servo_numbers[1], position[1])
+    time.sleep(sleep_time)
+    idle_claw(vehicle, servo_numbers)
 
-def close_claw(vehicle, servo_numbers=(14, 9), position=1000, sleep_time=0.5):
-    change_claw(vehicle, servo_numbers, position)
+def close_claw(vehicle, servo_numbers=(14, 9), position=(1000, 2000, 1500), sleep_time=0.5):
+    set_servo_position(vehicle, servo_numbers[0], position[0])
+    set_servo_position(vehicle, servo_numbers[1], position[1])
+    time.sleep(sleep_time)
+    idle_claw(vehicle, servo_numbers)
 
 def idle_claw(vehicle, servo_numbers=(14, 9), position=1500, sleep_time=0):
     change_claw(vehicle, servo_numbers, position)
@@ -128,7 +134,6 @@ def operate_claw(vehicle, servo_numbers=(14, 9), open_position=2000, closed_posi
     try:
         open_claw(vehicle, servo_numbers)
         close_claw(vehicle, servo_numbers)
-        idle_claw(vehicle, servo_numbers)
 
         logging.info("Claw operation completed")
         return True

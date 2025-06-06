@@ -12,6 +12,7 @@ import sys
 import logging
 import time
 from typing import Dict, Callable, Any
+from missions.waypoint_comp_area_bullseye import mission_competition_area_bullseye
 from missions.waypoint_comp_area_gcp import mission_competition_area_gcp
 from pymavlink import mavutil
 
@@ -77,6 +78,7 @@ class MissionConfig:
         "test-waypoint-gcp": ["waypoint-gcp", "wgcp", "gcp-waypoint"],
 
         "test-comp-area-gcp": ["comp-area", "comp-gcp", "area-gcp", "competition-area"],
+        "test-comp-area-bullseye": ["comp-bullseye", "comp-bull", "area-bullseye", "area-bull", "competition-bullseye"],
 
         "test-claw": ["claw"],
         "close-claw": ["close"],
@@ -146,6 +148,7 @@ class DroneController:
             "close-claw": self._close_claw,
 
             "test-comp-area-gcp": self._handle_comp_area_gcp,
+            "test-comp-area-bullseye": self._handle_comp_area_bullseye,
         }
 
 
@@ -579,6 +582,17 @@ class DroneController:
             model_path=args.gcp_model,
             confidence=args.gcp_confidence,
             video_recorder=self.video_recorder
+        )
+
+    def _handle_comp_area_bullseye(self, args) -> bool:
+        """Handle competition area bullseye detection mission"""
+        return mission_competition_area_bullseye(
+            vehicle=self.vehicle,
+            altitude=args.altitude,
+            model_path=args.model,
+            confidence=args.confidence,
+            video_recorder=self.video_recorder,
+            action=args.action
         )
 
 

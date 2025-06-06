@@ -246,6 +246,9 @@ class DroneController:
         # Set default action if none specified
         parser.set_defaults(action="land")
 
+        parser.add_argument("--coverage", type=str, default="medium",
+                            choices=['minimal', 'sparse', 'medium', 'dense', 'ultra'],
+                            help="Coverage density for area search missions (default: medium)")
 
         return parser
 
@@ -592,7 +595,8 @@ class DroneController:
             model_path=args.model,
             confidence=args.confidence,
             video_recorder=self.video_recorder,
-            action=args.action
+            action=args.action,
+            coverage_spacing=args.coverage
         )
 
 

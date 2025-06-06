@@ -31,7 +31,8 @@ from detection.camera import initialize_camera, capture_frame, close_camera
 mission_data = None
 
 def mission_competition_area_bullseye(vehicle, altitude=8, model_path="models/best.pt",
-                                    confidence=0.5, video_recorder=None, action='land'):
+                                    confidence=0.5, video_recorder=None, action='land',
+                                    coverage_spacing='medium'):
     """
     Execute competition-ready area bullseye detection mission within 4-corner boundary.
 
@@ -48,6 +49,7 @@ def mission_competition_area_bullseye(vehicle, altitude=8, model_path="models/be
         confidence: Detection confidence threshold
         video_recorder: Existing video recorder (optional)
         action: Action to perform at bullseye center ('land', 'drop', 'deliver')
+        coverage_spacing: Coverage density ('sparse', 'medium', 'dense', 'minimal')
 
     Returns:
         True if mission completed successfully
@@ -109,15 +111,10 @@ def mission_competition_area_bullseye(vehicle, altitude=8, model_path="models/be
 
         # Define the 4-corner boundary area for competition
         boundary_corners = [
-            # (35.3482380, -119.1051073),  # Northwest
-            # (35.3481549, -119.1051114),  # Southwest
-            # (35.3481462, -119.1046983),  # Southeast
-            # (35.3482402, -119.1046970),  # Northeast
-
-(35.3482337,    -119.1050604),
-(35.3481571,    -119.1050617),
-(35.3481582,    -119.1047727),
-(35.3482369,    -119.1047741),
+            (35.3482380, -119.1051073),  # Northwest
+            (35.3481549, -119.1051114),  # Southwest
+            (35.3481462, -119.1046983),  # Southeast
+            (35.3482402, -119.1046970),  # Northeast
         ]
 
         mission_data['boundary_corners'] = boundary_corners
@@ -171,7 +168,7 @@ def mission_competition_area_bullseye(vehicle, altitude=8, model_path="models/be
         # PHASE 2: Systematic Coverage
         logging.info("\n🔍 PHASE 2: SYSTEMATIC LAWNMOWER COVERAGE")
         coverage_detections = perform_systematic_coverage_bullseye(
-            vehicle, boundary_corners, altitude, detector, video_recorder, output_dir
+            vehicle, boundary_corners, altitude, detector, video_recorder, output_dir, coverage_spacing
         )
 
         if coverage_detections:
@@ -276,7 +273,7 @@ def perform_boundary_reconnaissance_bullseye(vehicle, boundary_corners, altitude
         logging.error(f"Error during boundary reconnaissance: {str(e)}")
         return []
 
-def perform_systematic_coverage_bullseye(vehicle, boundary_corners, altitude, detector, video_recorder, output_dir):
+def perform_systematic_coverage_bullseye(vehicle, boundary_corners, altitude, detector, video_recorder, output_dir, coverage_spacing='medium'):
     """
     Phase 2: Systematic lawnmower pattern coverage within boundary for bullseyes
     """
@@ -290,8 +287,27 @@ def perform_systematic_coverage_bullseye(vehicle, boundary_corners, altitude, de
         min_lat, max_lat = min(lats), max(lats)
         min_lon, max_lon = min(lons), max(lons)
 
-        # Generate lawnmower pattern with appropriate spacing for bullseye detection
-        pattern_spacing = 0.000040  # ~4.5m spacing for better bullseye coverage
+        # CONFIGURABLE SPACING BASED ON PARAMETER
+        spacing_options = {
+            'minimal': 0.000100,  # ~11m spacing - FASTEST (fewest waypoints)
+            'sparse': 0.000080,   # ~9m spacing - reduces waypoints by ~60%
+            'medium': 0.000060,   # ~6.5m spacing - reduces waypoints by ~40% (DEFAULT)
+            'dense': 0.000040,    # ~4.5m spacing - original setting
+            'ultra': 0.000030     # ~3.5m spacing - maximum coverage
+        }
+
+        pattern_spacing = spacing_options.get(coverage_spacing, spacing_options['medium'])
+
+        # Calculate estimated waypoint count for user info
+        lat_range = max_lat - min_lat
+        lon_range = max_lon - min_lon
+        estimated_passes = int(lon_range / pattern_spacing) + 1
+        estimated_waypoints_per_pass = int(lat_range / pattern_spacing) + 1
+        estimated_total = estimated_passes * estimated_waypoints_per_pass
+
+        logging.info(f"📏 Coverage mode: {coverage_spacing.upper()}")
+        logging.info(f"📏 Spacing: {pattern_spacing*111000:.1f}m between waypoints")
+        logging.info(f"📏 Estimated waypoints: ~{estimated_total}")
 
         pattern_waypoints = generate_lawnmower_pattern(
             min_lat, max_lat, min_lon, max_lon, pattern_spacing

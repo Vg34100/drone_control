@@ -12,6 +12,7 @@ import sys
 import logging
 import time
 from typing import Dict, Callable, Any
+from missions.waypoint_comp_area_gcp import mission_competition_area_gcp
 from pymavlink import mavutil
 
 # Import modules
@@ -74,6 +75,8 @@ class MissionConfig:
         # GCP Detection missions
         "test-gcp-yolo": ["gcp", "gcp-yolo", "test-gcp", "gcp-test"],
         "test-waypoint-gcp": ["waypoint-gcp", "wgcp", "gcp-waypoint"],
+
+        "test-comp-area-gcp": ["comp-area", "comp-gcp", "area-gcp", "competition-area"],
 
         "test-claw": ["claw"],
         "close-claw": ["close"],
@@ -142,7 +145,7 @@ class DroneController:
             "test-claw": self._test_claw,
             "close-claw": self._close_claw,
 
-
+            "test-comp-area-gcp": self._handle_comp_area_gcp,
         }
 
 
@@ -275,6 +278,9 @@ class DroneController:
         lines.append("  python main.py test-parser --source test.mission  # test mission parser")
         lines.append("  python main.py diamond --mission-file waypoints.mission --altitude 8  # use mission file with altitude override")
 
+
+        lines.append("  python main.py comp-area --altitude 8 --gcp-confidence 0.6  # competition area GCP mission")
+        lines.append("  python main.py test-comp-area-gcp --gcp-model best-gcp.pt --altitude 10")
 
         return "\n".join(lines)
 
@@ -565,6 +571,16 @@ class DroneController:
             return False
 
         return test_mission_parser(mission_file)
+    def _handle_comp_area_gcp(self, args) -> bool:
+        """Handle competition area GCP detection mission"""
+        return mission_competition_area_gcp(
+            vehicle=self.vehicle,
+            altitude=args.altitude,
+            model_path=args.gcp_model,
+            confidence=args.gcp_confidence,
+            video_recorder=self.video_recorder
+        )
+
 
     def _handle_preflight_all(self, args) -> bool:
         """Run comprehensive preflight checks"""
